@@ -21,12 +21,11 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
-	imageutils "k8s.io/kubernetes/test/utils/image"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 )
 
 const (
@@ -36,8 +35,6 @@ const (
 	etcHostsPath               = "/etc/hosts"
 	etcHostsOriginalPath       = "/etc/hosts-original"
 )
-
-var etcHostsImageName = imageutils.GetE2EImage(imageutils.Agnhost)
 
 type KubeletManagedHostConfig struct {
 	hostNetworkPod *v1.Pod
@@ -52,7 +49,7 @@ var _ = framework.KubeDescribe("KubeletManagedEtcHosts", func() {
 	}
 
 	/*
-		Release : v1.9
+		Release: v1.9
 		Testname: Kubelet, managed etc hosts
 		Description: Create a Pod with containers with hostNetwork set to false, one of the containers mounts the /etc/hosts file form the host. Create a second Pod with hostNetwork set to true.
 			1. The Pod with hostNetwork=false MUST have /etc/hosts of containers managed by the Kubelet.
@@ -137,11 +134,11 @@ func assertManagedStatus(
 	}
 
 	if expectedIsManaged {
-		e2elog.Failf(
+		framework.Failf(
 			"/etc/hosts file should be kubelet managed (name: %s, retries: %d). /etc/hosts contains %q",
 			name, retryCount, etcHostsContent)
 	} else {
-		e2elog.Failf(
+		framework.Failf(
 			"/etc/hosts file should no be kubelet managed (name: %s, retries: %d). /etc/hosts contains %q",
 			name, retryCount, etcHostsContent)
 	}
@@ -154,61 +151,28 @@ func (config *KubeletManagedHostConfig) getFileContents(podName, containerName, 
 func (config *KubeletManagedHostConfig) createPodSpec(podName string) *v1.Pod {
 	hostPathType := new(v1.HostPathType)
 	*hostPathType = v1.HostPathType(string(v1.HostPathFileOrCreate))
+	mounts := []v1.VolumeMount{
+		{
+			Name:      "host-etc-hosts",
+			MountPath: etcHostsOriginalPath,
+		},
+	}
+	multipleMounts := []v1.VolumeMount{
+		mounts[0],
+		{
+			Name:      "host-etc-hosts",
+			MountPath: etcHostsPath,
+		},
+	}
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: podName,
 		},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{
-				{
-					Name:            "busybox-1",
-					Image:           etcHostsImageName,
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command: []string{
-						"sleep",
-						"900",
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsOriginalPath,
-						},
-					},
-				},
-				{
-					Name:            "busybox-2",
-					Image:           etcHostsImageName,
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command: []string{
-						"sleep",
-						"900",
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsOriginalPath,
-						},
-					},
-				},
-				{
-					Name:            "busybox-3",
-					Image:           etcHostsImageName,
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command: []string{
-						"sleep",
-						"900",
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsPath,
-						},
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsOriginalPath,
-						},
-					},
-				},
+				e2epod.NewAgnhostContainer("busybox-1", mounts, nil),
+				e2epod.NewAgnhostContainer("busybox-2", mounts, nil),
+				e2epod.NewAgnhostContainer("busybox-3", multipleMounts, nil),
 			},
 			Volumes: []v1.Volume{
 				{
@@ -223,12 +187,19 @@ func (config *KubeletManagedHostConfig) createPodSpec(podName string) *v1.Pod {
 			},
 		},
 	}
+
 	return pod
 }
 
 func (config *KubeletManagedHostConfig) createPodSpecWithHostNetwork(podName string) *v1.Pod {
 	hostPathType := new(v1.HostPathType)
 	*hostPathType = v1.HostPathType(string(v1.HostPathFileOrCreate))
+	mounts := []v1.VolumeMount{
+		{
+			Name:      "host-etc-hosts",
+			MountPath: etcHostsOriginalPath,
+		},
+	}
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: podName,
@@ -237,36 +208,8 @@ func (config *KubeletManagedHostConfig) createPodSpecWithHostNetwork(podName str
 			HostNetwork:     true,
 			SecurityContext: &v1.PodSecurityContext{},
 			Containers: []v1.Container{
-				{
-					Name:            "busybox-1",
-					Image:           etcHostsImageName,
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command: []string{
-						"sleep",
-						"900",
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsOriginalPath,
-						},
-					},
-				},
-				{
-					Name:            "busybox-2",
-					Image:           etcHostsImageName,
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command: []string{
-						"sleep",
-						"900",
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "host-etc-hosts",
-							MountPath: etcHostsOriginalPath,
-						},
-					},
-				},
+				e2epod.NewAgnhostContainer("busybox-1", mounts, nil),
+				e2epod.NewAgnhostContainer("busybox-2", mounts, nil),
 			},
 			Volumes: []v1.Volume{
 				{

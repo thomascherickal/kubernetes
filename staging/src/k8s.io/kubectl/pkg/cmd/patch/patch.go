@@ -18,12 +18,13 @@ package patch
 
 import (
 	"fmt"
+	"io/ioutil"
 	"reflect"
 	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,14 +58,17 @@ type PatchOptions struct {
 	Local     bool
 	PatchType string
 	Patch     string
+	PatchFile string
 
 	namespace                    string
 	enforceNamespace             bool
-	dryRun                       bool
+	dryRunStrategy               cmdutil.DryRunStrategy
+	dryRunVerifier               *resource.DryRunVerifier
 	outputFormat                 string
 	args                         []string
 	builder                      *resource.Builder
 	unstructuredClientForMapping func(mapping *meta.RESTMapping) (resource.RESTClient, error)
+	fieldManager                 string
 
 	genericclioptions.IOStreams
 }
@@ -105,9 +109,9 @@ func NewCmdPatch(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobr
 	o := NewPatchOptions(ioStreams)
 
 	cmd := &cobra.Command{
-		Use:                   "patch (-f FILENAME | TYPE NAME) -p PATCH",
+		Use:                   "patch (-f FILENAME | TYPE NAME) [-p PATCH|--patch-file FILE]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Update field(s) of a resource using strategic merge patch"),
+		Short:                 i18n.T("Update field(s) of a resource"),
 		Long:                  patchLong,
 		Example:               patchExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -121,11 +125,12 @@ func NewCmdPatch(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobr
 	o.PrintFlags.AddFlags(cmd)
 
 	cmd.Flags().StringVarP(&o.Patch, "patch", "p", "", "The patch to be applied to the resource JSON file.")
-	cmd.MarkFlagRequired("patch")
+	cmd.Flags().StringVar(&o.PatchFile, "patch-file", "", "A file containing a patch to be applied to the resource.")
 	cmd.Flags().StringVar(&o.PatchType, "type", "strategic", fmt.Sprintf("The type of patch being provided; one of %v", sets.StringKeySet(patchTypes).List()))
 	cmdutil.AddDryRunFlag(cmd)
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, "identifying the resource to update")
 	cmd.Flags().BoolVar(&o.Local, "local", o.Local, "If true, patch will operate on the content of the file, not the server-side resource.")
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-patch")
 
 	return cmd
 }
@@ -139,13 +144,14 @@ func (o *PatchOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	}
 
 	o.outputFormat = cmdutil.GetFlagString(cmd, "output")
-	o.dryRun = cmdutil.GetFlagBool(cmd, "dry-run")
+	o.dryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
+	if err != nil {
+		return err
+	}
 
+	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.dryRunStrategy)
 	o.ToPrinter = func(operation string) (printers.ResourcePrinter, error) {
 		o.PrintFlags.NamePrintFlags.Operation = operation
-		if o.dryRun {
-			o.PrintFlags.Complete("%s (dry run)")
-		}
 
 		return o.PrintFlags.ToPrinter()
 	}
@@ -157,16 +163,31 @@ func (o *PatchOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	o.args = args
 	o.builder = f.NewBuilder()
 	o.unstructuredClientForMapping = f.UnstructuredClientForMapping
+	dynamicClient, err := f.DynamicClient()
+	if err != nil {
+		return err
+	}
+	discoveryClient, err := f.ToDiscoveryClient()
+	if err != nil {
+		return err
+	}
+	o.dryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
 
 	return nil
 }
 
 func (o *PatchOptions) Validate() error {
+	if len(o.Patch) > 0 && len(o.PatchFile) > 0 {
+		return fmt.Errorf("cannot specify --patch and --patch-file together")
+	}
+	if len(o.Patch) == 0 && len(o.PatchFile) == 0 {
+		return fmt.Errorf("must specify --patch or --patch-file containing the contents of the patch")
+	}
 	if o.Local && len(o.args) != 0 {
 		return fmt.Errorf("cannot specify --local and server resources")
 	}
-	if len(o.Patch) == 0 {
-		return fmt.Errorf("must specify -p to patch")
+	if o.Local && o.dryRunStrategy == cmdutil.DryRunServer {
+		return fmt.Errorf("cannot specify --local and --dry-run=server - did you mean --dry-run=client?")
 	}
 	if len(o.PatchType) != 0 {
 		if _, ok := patchTypes[strings.ToLower(o.PatchType)]; !ok {
@@ -183,7 +204,18 @@ func (o *PatchOptions) RunPatch() error {
 		patchType = patchTypes[strings.ToLower(o.PatchType)]
 	}
 
-	patchBytes, err := yaml.ToJSON([]byte(o.Patch))
+	var patchBytes []byte
+	if len(o.PatchFile) > 0 {
+		var err error
+		patchBytes, err = ioutil.ReadFile(o.PatchFile)
+		if err != nil {
+			return fmt.Errorf("unable to read patch file: %v", err)
+		}
+	} else {
+		patchBytes = []byte(o.Patch)
+	}
+
+	patchBytes, err := yaml.ToJSON(patchBytes)
 	if err != nil {
 		return fmt.Errorf("unable to parse %q: %v", o.Patch, err)
 	}
@@ -210,14 +242,22 @@ func (o *PatchOptions) RunPatch() error {
 		count++
 		name, namespace := info.Name, info.Namespace
 
-		if !o.Local && !o.dryRun {
+		if !o.Local && o.dryRunStrategy != cmdutil.DryRunClient {
 			mapping := info.ResourceMapping()
+			if o.dryRunStrategy == cmdutil.DryRunServer {
+				if err := o.dryRunVerifier.HasSupport(mapping.GroupVersionKind); err != nil {
+					return err
+				}
+			}
 			client, err := o.unstructuredClientForMapping(mapping)
 			if err != nil {
 				return err
 			}
 
-			helper := resource.NewHelper(client, mapping)
+			helper := resource.
+				NewHelper(client, mapping).
+				DryRun(o.dryRunStrategy == cmdutil.DryRunServer).
+				WithFieldManager(o.fieldManager)
 			patchedObj, err := helper.Patch(namespace, name, patchType, patchBytes, nil)
 			if err != nil {
 				return err

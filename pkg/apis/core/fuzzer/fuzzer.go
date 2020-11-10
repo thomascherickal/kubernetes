@@ -263,6 +263,14 @@ var Funcs = func(codecs runtimeserializer.CodecFactory) []interface{} {
 				i.ISCSIInterface = "default"
 			}
 		},
+		func(i *core.PersistentVolumeClaimSpec, c fuzz.Continue) {
+			// Match defaulting in pkg/apis/core/v1/defaults.go.
+			volumeMode := core.PersistentVolumeMode(c.RandString())
+			if volumeMode == "" {
+				volumeMode = core.PersistentVolumeFilesystem
+			}
+			i.VolumeMode = &volumeMode
+		},
 		func(d *core.DNSPolicy, c fuzz.Continue) {
 			policies := []core.DNSPolicy{core.DNSClusterFirst, core.DNSDefault}
 			*d = policies[c.Rand.Intn(len(policies))]
@@ -279,6 +287,11 @@ var Funcs = func(codecs runtimeserializer.CodecFactory) []interface{} {
 			types := []core.ServiceType{core.ServiceTypeClusterIP, core.ServiceTypeNodePort, core.ServiceTypeLoadBalancer}
 			*p = types[c.Rand.Intn(len(types))]
 		},
+		func(p *core.IPFamily, c fuzz.Continue) {
+			types := []core.IPFamily{core.IPv4Protocol, core.IPv6Protocol}
+			selected := types[c.Rand.Intn(len(types))]
+			*p = selected
+		},
 		func(p *core.ServiceExternalTrafficPolicyType, c fuzz.Continue) {
 			types := []core.ServiceExternalTrafficPolicyType{core.ServiceExternalTrafficPolicyTypeCluster, core.ServiceExternalTrafficPolicyTypeLocal}
 			*p = types[c.Rand.Intn(len(types))]
@@ -287,6 +300,11 @@ var Funcs = func(codecs runtimeserializer.CodecFactory) []interface{} {
 			c.FuzzNoCustom(ct)                                          // fuzz self without calling this function again
 			ct.TerminationMessagePath = "/" + ct.TerminationMessagePath // Must be non-empty
 			ct.TerminationMessagePolicy = "File"
+		},
+		func(ep *core.EphemeralContainer, c fuzz.Continue) {
+			c.FuzzNoCustom(ep)                                                                   // fuzz self without calling this function again
+			ep.EphemeralContainerCommon.TerminationMessagePath = "/" + ep.TerminationMessagePath // Must be non-empty
+			ep.EphemeralContainerCommon.TerminationMessagePolicy = "File"
 		},
 		func(p *core.Probe, c fuzz.Continue) {
 			c.FuzzNoCustom(p)

@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -21,9 +23,9 @@ import (
 	"net"
 	"strings"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 )
 
@@ -36,7 +38,6 @@ const (
 
 // PortMapping represents a network port in a container
 type PortMapping struct {
-	Name          string
 	HostPort      int32
 	ContainerPort int32
 	Protocol      v1.Protocol
@@ -136,7 +137,11 @@ func ensureKubeHostportChains(iptables utiliptables.Interface, natInterfaceName 
 	}
 	if natInterfaceName != "" && natInterfaceName != "lo" {
 		// Need to SNAT traffic from localhost
-		args = []string{"-m", "comment", "--comment", "SNAT for localhost access to hostports", "-o", natInterfaceName, "-s", "127.0.0.0/8", "-j", "MASQUERADE"}
+		localhost := "127.0.0.0/8"
+		if iptables.IsIPv6() {
+			localhost = "::1/128"
+		}
+		args = []string{"-m", "comment", "--comment", "SNAT for localhost access to hostports", "-o", natInterfaceName, "-s", localhost, "-j", "MASQUERADE"}
 		if _, err := iptables.EnsureRule(utiliptables.Append, utiliptables.TableNAT, utiliptables.ChainPostrouting, args...); err != nil {
 			return fmt.Errorf("failed to ensure that %s chain %s jumps to MASQUERADE: %v", utiliptables.TableNAT, utiliptables.ChainPostrouting, err)
 		}

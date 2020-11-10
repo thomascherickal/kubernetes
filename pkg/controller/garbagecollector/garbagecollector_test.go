@@ -47,15 +47,15 @@ import (
 	"k8s.io/client-go/metadata/metadatainformer"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/controller-manager/pkg/informerfactory"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/controller"
 )
 
 type testRESTMapper struct {
 	meta.RESTMapper
 }
 
-func (_ *testRESTMapper) Reset() {}
+func (*testRESTMapper) Reset() {}
 
 func TestGarbageCollectorConstruction(t *testing.T) {
 	config := &restclient.Config{}
@@ -81,12 +81,12 @@ func TestGarbageCollectorConstruction(t *testing.T) {
 	// construction will not fail.
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(metadataClient, rm, twoResources, map[schema.GroupResource]struct{}{},
-		controller.NewInformerFactory(sharedInformers, metadataInformers), alwaysStarted)
+	gc, err := NewGarbageCollector(metadataClient, rm, map[schema.GroupResource]struct{}{},
+		informerfactory.NewInformerFactory(sharedInformers, metadataInformers), alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, 1, len(gc.dependencyGraphBuilder.monitors))
+	assert.Equal(t, 0, len(gc.dependencyGraphBuilder.monitors))
 
 	// Make sure resource monitor syncing creates and stops resource monitors.
 	tweakableRM.Add(schema.GroupVersionKind{Group: "tpr.io", Version: "v1", Kind: "unknown"}, nil)
@@ -198,12 +198,11 @@ func setupGC(t *testing.T, config *restclient.Config) garbageCollector {
 		t.Fatal(err)
 	}
 
-	podResource := map[schema.GroupVersionResource]struct{}{{Version: "v1", Resource: "pods"}: {}}
 	client := fake.NewSimpleClientset()
 	sharedInformers := informers.NewSharedInformerFactory(client, 0)
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(metadataClient, &testRESTMapper{testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}, podResource, ignoredResources, sharedInformers, alwaysStarted)
+	gc, err := NewGarbageCollector(metadataClient, &testRESTMapper{testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}, ignoredResources, sharedInformers, alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +405,16 @@ func TestProcessEvent(t *testing.T) {
 			dependencyGraphBuilder.processGraphChanges()
 			verifyGraphInvariants(scenario.name, dependencyGraphBuilder.uidToNode.uidToNode, t)
 		}
+	}
+}
+
+func BenchmarkReferencesDiffs(t *testing.B) {
+	t.ReportAllocs()
+	t.ResetTimer()
+	for n := 0; n < t.N; n++ {
+		old := []metav1.OwnerReference{{UID: "1"}, {UID: "2"}}
+		new := []metav1.OwnerReference{{UID: "2"}, {UID: "3"}}
+		referencesDiffs(old, new)
 	}
 }
 
@@ -817,13 +826,10 @@ func TestGarbageCollectorSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	podResource := map[schema.GroupVersionResource]struct{}{
-		{Group: "", Version: "v1", Resource: "pods"}: {},
-	}
 	sharedInformers := informers.NewSharedInformerFactory(client, 0)
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(metadataClient, rm, podResource, map[schema.GroupResource]struct{}{}, sharedInformers, alwaysStarted)
+	gc, err := NewGarbageCollector(metadataClient, rm, map[schema.GroupResource]struct{}{}, sharedInformers, alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +843,7 @@ func TestGarbageCollectorSync(t *testing.T) {
 	//        wait.PollImmediateUntil() loops with 100ms (hardcode) util the `stopCh` is closed:
 	//            GetDeletableResources()
 	//            gc.resyncMonitors()
-	//            controller.WaitForCacheSync() loops with `syncedPollPeriod` (hardcoded to 100ms), until either its stop channel is closed after `period`, or all caches synced.
+	//            cache.WaitForNamedCacheSync() loops with `syncedPollPeriod` (hardcoded to 100ms), until either its stop channel is closed after `period`, or all caches synced.
 	//
 	// Setting the period to 200ms allows the WaitForCacheSync() to check
 	// for cache sync ~2 times in every wait.PollImmediateUntil() loop.
@@ -900,7 +906,7 @@ func expectSyncNotBlocked(fakeDiscoveryClient *fakeServerResources, workerLock *
 	workerLockAcquired := make(chan struct{})
 	go func() {
 		workerLock.Lock()
-		workerLock.Unlock()
+		defer workerLock.Unlock()
 		close(workerLockAcquired)
 	}()
 	select {
@@ -918,16 +924,16 @@ type fakeServerResources struct {
 	InterfaceUsedCount int
 }
 
-func (_ *fakeServerResources) ServerResourcesForGroupVersion(groupVersion string) (*metav1.APIResourceList, error) {
+func (*fakeServerResources) ServerResourcesForGroupVersion(groupVersion string) (*metav1.APIResourceList, error) {
 	return nil, nil
 }
 
 // Deprecated: use ServerGroupsAndResources instead.
-func (_ *fakeServerResources) ServerResources() ([]*metav1.APIResourceList, error) {
+func (*fakeServerResources) ServerResources() ([]*metav1.APIResourceList, error) {
 	return nil, nil
 }
 
-func (_ *fakeServerResources) ServerGroupsAndResources() ([]*metav1.APIGroup, []*metav1.APIResourceList, error) {
+func (*fakeServerResources) ServerGroupsAndResources() ([]*metav1.APIGroup, []*metav1.APIResourceList, error) {
 	return nil, nil, nil
 }
 
@@ -956,6 +962,6 @@ func (f *fakeServerResources) getInterfaceUsedCount() int {
 	return f.InterfaceUsedCount
 }
 
-func (_ *fakeServerResources) ServerPreferredNamespacedResources() ([]*metav1.APIResourceList, error) {
+func (*fakeServerResources) ServerPreferredNamespacedResources() ([]*metav1.APIResourceList, error) {
 	return nil, nil
 }

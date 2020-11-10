@@ -16,27 +16,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
+	kubeletstatsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
-	kubeletstatsv1alpha1 "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	kubemetrics "k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
@@ -125,7 +126,7 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 				interval: 0 * time.Millisecond,
 			},
 			{
-				podsNr:   105,
+				podsNr:   90,
 				interval: 0 * time.Millisecond,
 			},
 			{
@@ -137,7 +138,7 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 				interval: 100 * time.Millisecond,
 			},
 			{
-				podsNr:   105,
+				podsNr:   90,
 				interval: 100 * time.Millisecond,
 			},
 			{
@@ -149,7 +150,7 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 				interval: 300 * time.Millisecond,
 			},
 			{
-				podsNr:   105,
+				podsNr:   90,
 				interval: 300 * time.Millisecond,
 			},
 		}
@@ -175,17 +176,17 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 	ginkgo.Context("create a batch of pods with higher API QPS", func() {
 		dTests := []densityTest{
 			{
-				podsNr:      105,
+				podsNr:      90,
 				interval:    0 * time.Millisecond,
 				APIQPSLimit: 60,
 			},
 			{
-				podsNr:      105,
+				podsNr:      90,
 				interval:    100 * time.Millisecond,
 				APIQPSLimit: 60,
 			},
 			{
-				podsNr:      105,
+				podsNr:      90,
 				interval:    300 * time.Millisecond,
 				APIQPSLimit: 60,
 			},
@@ -200,7 +201,7 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 				// Here we set API QPS limit from default 5 to 60 in order to test real Kubelet performance.
 				// Note that it will cause higher resource usage.
 				tempSetCurrentKubeletConfig(f, func(cfg *kubeletconfig.KubeletConfiguration) {
-					e2elog.Logf("Old QPS limit is: %d", cfg.KubeAPIQPS)
+					framework.Logf("Old QPS limit is: %d", cfg.KubeAPIQPS)
 					// Set new API QPS limit
 					cfg.KubeAPIQPS = int32(itArg.APIQPSLimit)
 				})
@@ -360,7 +361,7 @@ func runDensityBatchTest(f *framework.Framework, rc *ResourceCollector, testArg 
 	}, 10*time.Minute, 10*time.Second).Should(gomega.BeTrue())
 
 	if len(watchTimes) < testArg.podsNr {
-		e2elog.Failf("Timeout reached waiting for all Pods to be observed by the watch.")
+		framework.Failf("Timeout reached waiting for all Pods to be observed by the watch.")
 	}
 
 	// Analyze results
@@ -493,12 +494,12 @@ func newInformerWatchPod(f *framework.Framework, mutex *sync.Mutex, watchTimes m
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				options.LabelSelector = labels.SelectorFromSet(labels.Set{"type": podType}).String()
-				obj, err := f.ClientSet.CoreV1().Pods(ns).List(options)
+				obj, err := f.ClientSet.CoreV1().Pods(ns).List(context.TODO(), options)
 				return runtime.Object(obj), err
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				options.LabelSelector = labels.SelectorFromSet(labels.Set{"type": podType}).String()
-				return f.ClientSet.CoreV1().Pods(ns).Watch(options)
+				return f.ClientSet.CoreV1().Pods(ns).Watch(context.TODO(), options)
 			},
 		},
 		&v1.Pod{},
@@ -534,23 +535,55 @@ func createBatchPodSequential(f *framework.Framework, pods []*v1.Pod) (time.Dura
 	return batchLag, e2eLags
 }
 
+// verifyLatencyWithinThreshold verifies whether 50, 90 and 99th percentiles of a latency metric are
+// within the expected threshold.
+func verifyLatencyWithinThreshold(threshold, actual e2emetrics.LatencyMetric, metricName string) error {
+	if actual.Perc50 > threshold.Perc50 {
+		return fmt.Errorf("too high %v latency 50th percentile: %v", metricName, actual.Perc50)
+	}
+	if actual.Perc90 > threshold.Perc90 {
+		return fmt.Errorf("too high %v latency 90th percentile: %v", metricName, actual.Perc90)
+	}
+	if actual.Perc99 > threshold.Perc99 {
+		return fmt.Errorf("too high %v latency 99th percentile: %v", metricName, actual.Perc99)
+	}
+	return nil
+}
+
+// extractLatencyMetrics returns latency metrics for each percentile(50th, 90th and 99th).
+func extractLatencyMetrics(latencies []e2emetrics.PodLatencyData) e2emetrics.LatencyMetric {
+	length := len(latencies)
+	perc50 := latencies[int(math.Ceil(float64(length*50)/100))-1].Latency
+	perc90 := latencies[int(math.Ceil(float64(length*90)/100))-1].Latency
+	perc99 := latencies[int(math.Ceil(float64(length*99)/100))-1].Latency
+	perc100 := latencies[length-1].Latency
+	return e2emetrics.LatencyMetric{Perc50: perc50, Perc90: perc90, Perc99: perc99, Perc100: perc100}
+}
+
+// printLatencies outputs latencies to log with readable format.
+func printLatencies(latencies []e2emetrics.PodLatencyData, header string) {
+	metrics := extractLatencyMetrics(latencies)
+	framework.Logf("10%% %s: %v", header, latencies[(len(latencies)*9)/10:])
+	framework.Logf("perc50: %v, perc90: %v, perc99: %v", metrics.Perc50, metrics.Perc90, metrics.Perc99)
+}
+
 // logAndVerifyLatency verifies that whether pod creation latency satisfies the limit.
 func logAndVerifyLatency(batchLag time.Duration, e2eLags []e2emetrics.PodLatencyData, podStartupLimits e2emetrics.LatencyMetric,
 	podBatchStartupLimit time.Duration, testInfo map[string]string, isVerify bool) {
-	e2emetrics.PrintLatencies(e2eLags, "worst client e2e total latencies")
+	printLatencies(e2eLags, "worst client e2e total latencies")
 
 	// TODO(coufon): do not trust 'kubelet' metrics since they are not reset!
 	latencyMetrics, _ := getPodStartLatency(kubeletAddr)
-	e2elog.Logf("Kubelet Prometheus metrics (not reset):\n%s", e2emetrics.PrettyPrintJSON(latencyMetrics))
+	framework.Logf("Kubelet Prometheus metrics (not reset):\n%s", framework.PrettyPrintJSON(latencyMetrics))
 
-	podStartupLatency := e2emetrics.ExtractLatencyMetrics(e2eLags)
+	podStartupLatency := extractLatencyMetrics(e2eLags)
 
 	// log latency perf data
 	logPerfData(getLatencyPerfData(podStartupLatency, testInfo), "latency")
 
 	if isVerify {
 		// check whether e2e pod startup time is acceptable.
-		framework.ExpectNoError(e2emetrics.VerifyLatencyWithinThreshold(podStartupLimits, podStartupLatency, "pod startup"))
+		framework.ExpectNoError(verifyLatencyWithinThreshold(podStartupLimits, podStartupLatency, "pod startup"))
 
 		// check bactch pod creation latency
 		if podBatchStartupLimit > 0 {

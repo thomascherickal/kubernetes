@@ -25,7 +25,11 @@ import (
 	"net/http"
 	"net/url"
 	goruntime "runtime"
+	"strings"
 	"time"
+
+	grpccodes "google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -42,7 +46,7 @@ import (
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/rest"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // RequestScope encapsulates common fields across all RESTful handler methods.
@@ -220,12 +224,15 @@ func finishRequest(timeout time.Duration, fn resultFunc) (result runtime.Object,
 		defer func() {
 			panicReason := recover()
 			if panicReason != nil {
-				// Same as stdlib http server code. Manually allocate stack
-				// trace buffer size to prevent excessively large logs
-				const size = 64 << 10
-				buf := make([]byte, size)
-				buf = buf[:goruntime.Stack(buf, false)]
-				panicReason = fmt.Sprintf("%v\n%s", panicReason, buf)
+				// do not wrap the sentinel ErrAbortHandler panic value
+				if panicReason != http.ErrAbortHandler {
+					// Same as stdlib http server code. Manually allocate stack
+					// trace buffer size to prevent excessively large logs
+					const size = 64 << 10
+					buf := make([]byte, size)
+					buf = buf[:goruntime.Stack(buf, false)]
+					panicReason = fmt.Sprintf("%v\n%s", panicReason, buf)
+				}
 				// Propagate to parent goroutine
 				panicCh <- panicReason
 			}
@@ -321,6 +328,12 @@ func checkName(obj runtime.Object, name, namespace string, namer ScopeNamer) err
 //   interfaces
 func setObjectSelfLink(ctx context.Context, obj runtime.Object, req *http.Request, namer ScopeNamer) error {
 	if utilfeature.DefaultFeatureGate.Enabled(features.RemoveSelfLink) {
+		// Ensure that for empty lists we don't return <nil> items.
+		if meta.IsListType(obj) && meta.LenList(obj) == 0 {
+			if err := meta.SetList(obj, []runtime.Object{}); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -406,9 +419,35 @@ func parseTimeout(str string) time.Duration {
 		}
 		klog.Errorf("Failed to parse %q: %v", str, err)
 	}
-	return 30 * time.Second
+	// 34 chose as a number close to 30 that is likely to be unique enough to jump out at me the next time I see a timeout.  Everyone chooses 30.
+	return 34 * time.Second
 }
 
 func isDryRun(url *url.URL) bool {
 	return len(url.Query()["dryRun"]) != 0
+}
+
+type etcdError interface {
+	Code() grpccodes.Code
+	Error() string
+}
+
+type grpcError interface {
+	GRPCStatus() *grpcstatus.Status
+}
+
+func isTooLargeError(err error) bool {
+	if err != nil {
+		if etcdErr, ok := err.(etcdError); ok {
+			if etcdErr.Code() == grpccodes.InvalidArgument && etcdErr.Error() == "etcdserver: request is too large" {
+				return true
+			}
+		}
+		if grpcErr, ok := err.(grpcError); ok {
+			if grpcErr.GRPCStatus().Code() == grpccodes.ResourceExhausted && strings.Contains(grpcErr.GRPCStatus().Message(), "trying to send message larger than max") {
+				return true
+			}
+		}
+	}
+	return false
 }

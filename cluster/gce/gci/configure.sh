@@ -24,13 +24,13 @@ set -o nounset
 set -o pipefail
 
 ### Hardcoded constants
-DEFAULT_CNI_VERSION="v0.7.5"
-DEFAULT_CNI_SHA1="52e9d2de8a5f927307d9397308735658ee44ab8d"
-DEFAULT_NPD_VERSION="v0.6.3"
-DEFAULT_NPD_SHA1="3a6ac56be6c121f1b94450bfd1a81ad28d532369"
-DEFAULT_CRICTL_VERSION="v1.14.0"
-DEFAULT_CRICTL_SHA1="1f93c6183d0a4e186708efe7899da7a7bce9c736"
-DEFAULT_MOUNTER_TAR_SHA="8003b798cf33c7f91320cd6ee5cec4fa22244571"
+DEFAULT_CNI_VERSION="v0.8.7"
+DEFAULT_CNI_HASH="8f2cbee3b5f94d59f919054dccfe99a8e3db5473b553d91da8af4763e811138533e05df4dbeab16b3f774852b4184a7994968f5e036a3f531ad1ac4620d10ede"
+DEFAULT_NPD_VERSION="v0.8.0"
+DEFAULT_NPD_HASH="b15d6919321e832b5fc7bc150c2e141e947305e82b34b514adbda9b9bc41088beadbf833f5bbbf44b9a8181c3fd8ed41e1629458d7544ccaecb374c22bde1517"
+DEFAULT_CRICTL_VERSION="v1.19.0"
+DEFAULT_CRICTL_HASH="fbbb34a1667bcf94df911a92ab6b70a9d2b34da967244a222f288bf0135c587cbfdcc89deedc5afd1823e109921df9caaa4e9ff9cc39e55a9b8cdea8eb6ebe72"
+DEFAULT_MOUNTER_TAR_SHA="7956fd42523de6b3107ddc3ce0e75233d2fcb78436ff07a1389b6eaac91fb2b1b72a08f7a219eaf96ba1ca4da8d45271002e0d60e0644e796c665f99bb356516"
 ###
 
 # Use --retry-connrefused opt only if it's supported by curl.
@@ -64,10 +64,15 @@ function download-kube-env {
       -o "${tmp_kube_env}" \
       http://metadata.google.internal/computeMetadata/v1/instance/attributes/kube-env
     # Convert the yaml format file into a shell-style file.
-    eval $(python -c '''
+    eval $(${PYTHON} -c '''
 import pipes,sys,yaml
-for k,v in yaml.load(sys.stdin).iteritems():
-  print("readonly {var}={value}".format(var = k, value = pipes.quote(str(v))))
+# check version of python and call methods appropriate for that version
+if sys.version_info[0] < 3:
+    items = yaml.load(sys.stdin).iteritems()
+else:
+    items = yaml.load(sys.stdin, Loader=yaml.BaseLoader).items()
+for k, v in items:
+    print("readonly {var}={value}".format(var=k, value=pipes.quote(str(v))))
 ''' < "${tmp_kube_env}" > "${KUBE_HOME}/kube-env")
     rm -f "${tmp_kube_env}"
   )
@@ -103,10 +108,15 @@ function download-kube-master-certs {
       -o "${tmp_kube_master_certs}" \
       http://metadata.google.internal/computeMetadata/v1/instance/attributes/kube-master-certs
     # Convert the yaml format file into a shell-style file.
-    eval $(python -c '''
+    eval $(${PYTHON} -c '''
 import pipes,sys,yaml
-for k,v in yaml.load(sys.stdin).iteritems():
-  print("readonly {var}={value}".format(var = k, value = pipes.quote(str(v))))
+# check version of python and call methods appropriate for that version
+if sys.version_info[0] < 3:
+    items = yaml.load(sys.stdin).iteritems()
+else:
+    items = yaml.load(sys.stdin, Loader=yaml.BaseLoader).items()
+for k, v in items:
+    print("readonly {var}={value}".format(var=k, value=pipes.quote(str(v))))
 ''' < "${tmp_kube_master_certs}" > "${KUBE_HOME}/kube-master-certs")
     rm -f "${tmp_kube_master_certs}"
   )
@@ -116,9 +126,10 @@ function validate-hash {
   local -r file="$1"
   local -r expected="$2"
 
-  actual=$(sha1sum ${file} | awk '{ print $1 }') || true
-  if [[ "${actual}" != "${expected}" ]]; then
-    echo "== ${file} corrupted, sha1 ${actual} doesn't match expected ${expected} =="
+  actual_sha1=$(sha1sum "${file}" | awk '{ print $1 }') || true
+  actual_sha512=$(sha512sum "${file}" | awk '{ print $1 }') || true
+  if [[ "${actual_sha1}" != "${expected}" ]] && [[ "${actual_sha512}" != "${expected}" ]]; then
+    echo "== ${file} corrupted, sha1 ${actual_sha1}/sha512 ${actual_sha512} doesn't match expected ${expected} =="
     return 1
   fi
 }
@@ -126,17 +137,17 @@ function validate-hash {
 # Get default service account credentials of the VM.
 GCE_METADATA_INTERNAL="http://metadata.google.internal/computeMetadata/v1/instance"
 function get-credentials {
-  curl --fail --retry 5 --retry-delay 3 ${CURL_RETRY_CONNREFUSED} --silent --show-error "${GCE_METADATA_INTERNAL}/service-accounts/default/token" -H "Metadata-Flavor: Google" -s | python -c \
+  curl --fail --retry 5 --retry-delay 3 ${CURL_RETRY_CONNREFUSED} --silent --show-error "${GCE_METADATA_INTERNAL}/service-accounts/default/token" -H "Metadata-Flavor: Google" -s | ${PYTHON} -c \
     'import sys; import json; print(json.loads(sys.stdin.read())["access_token"])'
 }
 
 function valid-storage-scope {
-  curl --fail --retry 5 --retry-delay 3 ${CURL_RETRY_CONNREFUSED} --silent --show-error "${GCE_METADATA_INTERNAL}/service-accounts/default/scopes" -H "Metadata-Flavor: Google" -s | grep -q "auth/devstorage"
+  curl --fail --retry 5 --retry-delay 3 ${CURL_RETRY_CONNREFUSED} --silent --show-error "${GCE_METADATA_INTERNAL}/service-accounts/default/scopes" -H "Metadata-Flavor: Google" -s | grep -E "auth/devstorage|auth/cloud-platform"
 }
 
 # Retry a download until we get it. Takes a hash and a set of URLs.
 #
-# $1 is the sha1 of the URL. Can be "" if the sha1 is unknown.
+# $1 is the sha512/sha1 hash of the URL. Can be "" if the sha512/sha1 hash is unknown.
 # $2+ are the URLs to download.
 function download-or-bust {
   local -r hash="$1"
@@ -158,7 +169,7 @@ function download-or-bust {
         echo "== Hash validation of ${url} failed. Retrying. =="
       else
         if [[ -n "${hash}" ]]; then
-          echo "== Downloaded ${url} (SHA1 = ${hash}) =="
+          echo "== Downloaded ${url} (HASH = ${hash}) =="
         else
           echo "== Downloaded ${url} =="
         fi
@@ -210,21 +221,21 @@ function install-gci-mounter-tools {
 function install-node-problem-detector {
   if [[ -n "${NODE_PROBLEM_DETECTOR_VERSION:-}" ]]; then
       local -r npd_version="${NODE_PROBLEM_DETECTOR_VERSION}"
-      local -r npd_sha1="${NODE_PROBLEM_DETECTOR_TAR_HASH}"
+      local -r npd_hash="${NODE_PROBLEM_DETECTOR_TAR_HASH}"
   else
       local -r npd_version="${DEFAULT_NPD_VERSION}"
-      local -r npd_sha1="${DEFAULT_NPD_SHA1}"
+      local -r npd_hash="${DEFAULT_NPD_HASH}"
   fi
   local -r npd_tar="node-problem-detector-${npd_version}.tar.gz"
 
-  if is-preloaded "${npd_tar}" "${npd_sha1}"; then
+  if is-preloaded "${npd_tar}" "${npd_hash}"; then
     echo "${npd_tar} is preloaded."
     return
   fi
 
   echo "Downloading ${npd_tar}."
   local -r npd_release_path="${NODE_PROBLEM_DETECTOR_RELEASE_PATH:-https://storage.googleapis.com/kubernetes-release}"
-  download-or-bust "${npd_sha1}" "${npd_release_path}/node-problem-detector/${npd_tar}"
+  download-or-bust "${npd_hash}" "${npd_release_path}/node-problem-detector/${npd_tar}"
   local -r npd_dir="${KUBE_HOME}/node-problem-detector"
   mkdir -p "${npd_dir}"
   tar xzf "${KUBE_HOME}/${npd_tar}" -C "${npd_dir}" --overwrite
@@ -236,19 +247,23 @@ function install-node-problem-detector {
 
 function install-cni-binaries {
   if [[ -n "${CNI_VERSION:-}" ]]; then
-      local -r cni_tar="cni-plugins-amd64-${CNI_VERSION}.tgz"
-      local -r cni_sha1="${CNI_SHA1}"
+      local -r cni_version="${CNI_VERSION}"
+      local -r cni_hash="${CNI_HASH}"
   else
-      local -r cni_tar="cni-plugins-amd64-${DEFAULT_CNI_VERSION}.tgz"
-      local -r cni_sha1="${DEFAULT_CNI_SHA1}"
+      local -r cni_version="${DEFAULT_CNI_VERSION}"
+      local -r cni_hash="${DEFAULT_CNI_HASH}"
   fi
-  if is-preloaded "${cni_tar}" "${cni_sha1}"; then
+
+  local -r cni_tar="${CNI_TAR_PREFIX}${cni_version}.tgz"
+  local -r cni_url="${CNI_STORAGE_URL_BASE}/${cni_version}/${cni_tar}"
+
+  if is-preloaded "${cni_tar}" "${cni_hash}"; then
     echo "${cni_tar} is preloaded."
     return
   fi
 
   echo "Downloading cni binaries"
-  download-or-bust "${cni_sha1}" "${CNI_STORAGE_PATH}/${cni_tar}"
+  download-or-bust "${cni_hash}" "${cni_url}"
   local -r cni_dir="${KUBE_HOME}/cni"
   mkdir -p "${cni_dir}/bin"
   tar xzf "${KUBE_HOME}/${cni_tar}" -C "${cni_dir}/bin" --overwrite
@@ -261,28 +276,28 @@ function install-cni-binaries {
 function install-crictl {
   if [[ -n "${CRICTL_VERSION:-}" ]]; then
     local -r crictl_version="${CRICTL_VERSION}"
-    local -r crictl_sha1="${CRICTL_TAR_HASH}"
+    local -r crictl_hash="${CRICTL_TAR_HASH}"
   else
     local -r crictl_version="${DEFAULT_CRICTL_VERSION}"
-    local -r crictl_sha1="${DEFAULT_CRICTL_SHA1}"
+    local -r crictl_hash="${DEFAULT_CRICTL_HASH}"
   fi
-  local -r crictl="crictl-${crictl_version}-linux-amd64"
+  local -r crictl="crictl-${crictl_version}-linux-amd64.tar.gz"
 
   # Create crictl config file.
   cat > /etc/crictl.yaml <<EOF
 runtime-endpoint: ${CONTAINER_RUNTIME_ENDPOINT:-unix:///var/run/dockershim.sock}
 EOF
 
-  if is-preloaded "${crictl}" "${crictl_sha1}"; then
+  if is-preloaded "${crictl}" "${crictl_hash}"; then
     echo "crictl is preloaded"
     return
   fi
 
   echo "Downloading crictl"
-  local -r crictl_path="https://storage.googleapis.com/kubernetes-release/crictl"
-  download-or-bust "${crictl_sha1}" "${crictl_path}/${crictl}"
-  mv "${KUBE_HOME}/${crictl}" "${KUBE_BIN}/crictl"
-  chmod a+x "${KUBE_BIN}/crictl"
+  local -r crictl_path="https://storage.googleapis.com/k8s-artifacts-cri-tools/release/${crictl_version}"
+  download-or-bust "${crictl_hash}" "${crictl_path}/${crictl}"
+  tar xf "${crictl}"
+  mv crictl "${KUBE_BIN}/crictl"
 }
 
 function install-exec-auth-plugin {
@@ -290,10 +305,15 @@ function install-exec-auth-plugin {
       return
   fi
   local -r plugin_url="${EXEC_AUTH_PLUGIN_URL}"
-  local -r plugin_sha1="${EXEC_AUTH_PLUGIN_SHA1}"
+  local -r plugin_hash="${EXEC_AUTH_PLUGIN_HASH}"
+
+  if is-preloaded "gke-exec-auth-plugin" "${plugin_hash}"; then
+    echo "gke-exec-auth-plugin is preloaded"
+    return
+  fi
 
   echo "Downloading gke-exec-auth-plugin binary"
-  download-or-bust "${plugin_sha1}" "${plugin_url}"
+  download-or-bust "${plugin_hash}" "${plugin_url}"
   mv "${KUBE_HOME}/gke-exec-auth-plugin" "${KUBE_BIN}/gke-exec-auth-plugin"
   chmod a+x "${KUBE_BIN}/gke-exec-auth-plugin"
 
@@ -303,7 +323,7 @@ function install-exec-auth-plugin {
   local -r license_url="${EXEC_AUTH_PLUGIN_LICENSE_URL}"
   echo "Downloading gke-exec-auth-plugin license"
   download-or-bust "" "${license_url}"
-  mv "${KUBE_HOME}/LICENSE" "${KUBE_BIN}/gke-exec-auth-plugin-license"
+  mv "${KUBE_HOME}/LICENSES/LICENSE" "${KUBE_BIN}/gke-exec-auth-plugin-license"
 }
 
 function install-kube-manifests {
@@ -315,9 +335,9 @@ function install-kube-manifests {
   if [ -n "${KUBE_MANIFESTS_TAR_HASH:-}" ]; then
     local -r manifests_tar_hash="${KUBE_MANIFESTS_TAR_HASH}"
   else
-    echo "Downloading k8s manifests sha1 (not found in env)"
-    download-or-bust "" "${manifests_tar_urls[@]/.tar.gz/.tar.gz.sha1}"
-    local -r manifests_tar_hash=$(cat "${manifests_tar}.sha1")
+    echo "Downloading k8s manifests hash (not found in env)"
+    download-or-bust "" "${manifests_tar_urls[@]/.tar.gz/.tar.gz.sha512}"
+    local -r manifests_tar_hash=$(cat "${manifests_tar}.sha512")
   fi
 
   if is-preloaded "${manifests_tar}" "${manifests_tar_hash}"; then
@@ -336,6 +356,7 @@ function install-kube-manifests {
       xargs sed -ri "s@(image\":\s+\")k8s.gcr.io@\1${kube_addon_registry}@"
   fi
   cp "${dst_dir}/kubernetes/gci-trusty/gci-configure-helper.sh" "${KUBE_BIN}/configure-helper.sh"
+  cp "${dst_dir}/kubernetes/gci-trusty/configure-kubeapiserver.sh" "${KUBE_BIN}/configure-kubeapiserver.sh"
   if [[ -e "${dst_dir}/kubernetes/gci-trusty/gke-internal-configure-helper.sh" ]]; then
     cp "${dst_dir}/kubernetes/gci-trusty/gke-internal-configure-helper.sh" "${KUBE_BIN}/"
   fi
@@ -343,7 +364,7 @@ function install-kube-manifests {
   cp "${dst_dir}/kubernetes/gci-trusty/health-monitor.sh" "${KUBE_BIN}/health-monitor.sh"
 
   rm -f "${KUBE_HOME}/${manifests_tar}"
-  rm -f "${KUBE_HOME}/${manifests_tar}.sha1"
+  rm -f "${KUBE_HOME}/${manifests_tar}.sha512"
 }
 
 # A helper function for loading a docker image. It keeps trying up to 5 times.
@@ -356,9 +377,18 @@ function try-load-docker-image {
   set +e
   local -r max_attempts=5
   local -i attempt_num=1
-  until timeout 30 ${LOAD_IMAGE_COMMAND:-docker load -i} "${img}"; do
+
+  if [[ "${CONTAINER_RUNTIME_NAME:-}" == "docker" ]]; then
+    load_image_command=${LOAD_IMAGE_COMMAND:-docker load -i}
+  elif [[ "${CONTAINER_RUNTIME_NAME:-}" == "containerd" || "${CONTAINERD_TEST:-}"  == "containerd" ]]; then
+    load_image_command=${LOAD_IMAGE_COMMAND:-ctr -n=k8s.io images import}
+  else
+    load_image_command="${LOAD_IMAGE_COMMAND:-}"
+  fi
+
+  until timeout 30 ${load_image_command} "${img}"; do
     if [[ "${attempt_num}" == "${max_attempts}" ]]; then
-      echo "Fail to load docker image file ${img} after ${max_attempts} retries. Exit!!"
+      echo "Fail to load docker image file ${img} using ${load_image_command} after ${max_attempts} retries. Exit!!"
       exit 1
     else
       attempt_num=$((attempt_num+1))
@@ -383,6 +413,132 @@ function load-docker-images {
   fi
 }
 
+# If we are on ubuntu we can try to install docker
+function install-docker {
+  # bailout if we are not on ubuntu
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Unable to automatically install docker. Bailing out..."
+    return
+  fi
+  # Install Docker deps, some of these are already installed in the image but
+  # that's fine since they won't re-install and we can reuse the code below
+  # for another image someday.
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    ca-certificates \
+    socat \
+    curl \
+    gnupg2 \
+    software-properties-common \
+    lsb-release
+
+  release=$(lsb_release -cs)
+
+  # Add the Docker apt-repository
+  curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
+    | apt-key add -
+  add-apt-repository \
+    "deb [arch=amd64] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") \
+    $release stable"
+
+  # Install Docker
+  apt-get update && \
+    apt-get install -y --no-install-recommends ${GCI_DOCKER_VERSION:-"docker-ce=5:19.03.*"}
+  rm -rf /var/lib/apt/lists/*
+}
+
+# If we are on ubuntu we can try to install containerd
+function install-containerd-ubuntu {
+  # bailout if we are not on ubuntu
+  if [[ -z "$(command -v lsb_release)" || $(lsb_release -si) != "Ubuntu" ]]; then
+    echo "Unable to automatically install containerd in non-ubuntu image. Bailing out..."
+    exit 2
+  fi
+
+  if [[ $(dpkg --print-architecture) != "amd64" ]]; then
+    echo "Unable to automatically install containerd in non-amd64 image. Bailing out..."
+    exit 2
+  fi
+
+  # Install dependencies, some of these are already installed in the image but
+  # that's fine since they won't re-install and we can reuse the code below
+  # for another image someday.
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    ca-certificates \
+    socat \
+    curl \
+    gnupg2 \
+    software-properties-common \
+    lsb-release
+
+  release=$(lsb_release -cs)
+
+  # Add the Docker apt-repository (as we install containerd from there)
+  curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
+    | apt-key add -
+  add-apt-repository \
+    "deb [arch=amd64] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") \
+    $release stable"
+
+  # Install containerd from Docker repo
+  apt-get update && \
+    apt-get install -y --no-install-recommends containerd
+  rm -rf /var/lib/apt/lists/*
+
+  # Override to latest versions of containerd and runc
+  systemctl stop containerd
+  if [[ ! -z "${UBUNTU_INSTALL_CONTAINERD_VERSION:-}" ]]; then
+    # containerd versions have slightly different url(s), so try both
+    ( curl -fsSL "https://github.com/containerd/containerd/releases/download/${UBUNTU_INSTALL_CONTAINERD_VERSION}/containerd-${UBUNTU_INSTALL_CONTAINERD_VERSION:1}-linux-amd64.tar.gz" || \
+      curl -fsSL "https://github.com/containerd/containerd/releases/download/${UBUNTU_INSTALL_CONTAINERD_VERSION}/containerd-${UBUNTU_INSTALL_CONTAINERD_VERSION:1}.linux-amd64.tar.gz" ) \
+    | tar --overwrite -xzv -C /usr/
+  fi
+  if [[ ! -z "${UBUNTU_INSTALL_RUNC_VERSION:-}" ]]; then
+    curl -fsSL "https://github.com/opencontainers/runc/releases/download/${UBUNTU_INSTALL_RUNC_VERSION}/runc.amd64" --output /usr/sbin/runc && chmod 755 /usr/sbin/runc
+  fi
+  sudo systemctl start containerd
+}
+
+function ensure-container-runtime {
+  container_runtime="${CONTAINER_RUNTIME:-docker}"
+  if [[ "${container_runtime}" == "docker" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
+      install-docker
+      if ! command -v docker >/dev/null 2>&1; then
+        echo "ERROR docker not found. Aborting."
+        exit 2
+      fi
+    fi
+    docker version
+  elif [[ "${container_runtime}" == "containerd" ]]; then
+    # Install containerd/runc if requested
+    if [[ ! -z "${UBUNTU_INSTALL_CONTAINERD_VERSION:-}" || ! -z "${UBUNTU_INSTALL_RUNC_VERSION:-}" ]]; then
+      install-containerd-ubuntu
+    fi
+    # Verify presence and print versions of ctr, containerd, runc
+    if ! command -v ctr >/dev/null 2>&1; then
+      echo "ERROR ctr not found. Aborting."
+      exit 2
+    fi
+    ctr --version
+
+    if ! command -v containerd >/dev/null 2>&1; then
+      echo "ERROR containerd not found. Aborting."
+      exit 2
+    fi
+    containerd --version
+
+    if ! command -v runc >/dev/null 2>&1; then
+      echo "ERROR runc not found. Aborting."
+      exit 2
+    fi
+    runc --version
+  fi
+}
+
 # Downloads kubernetes binaries and kube-system manifest tarball, unpacks them,
 # and places them into suitable directories. Files are placed in /home/kubernetes.
 function install-kube-binary-config {
@@ -392,9 +548,9 @@ function install-kube-binary-config {
   if [[ -n "${SERVER_BINARY_TAR_HASH:-}" ]]; then
     local -r server_binary_tar_hash="${SERVER_BINARY_TAR_HASH}"
   else
-    echo "Downloading binary release sha1 (not found in env)"
-    download-or-bust "" "${server_binary_tar_urls[@]/.tar.gz/.tar.gz.sha1}"
-    local -r server_binary_tar_hash=$(cat "${server_binary_tar}.sha1")
+    echo "Downloading binary release sha512 (not found in env)"
+    download-or-bust "" "${server_binary_tar_urls[@]/.tar.gz/.tar.gz.sha512}"
+    local -r server_binary_tar_hash=$(cat "${server_binary_tar}.sha512")
   fi
 
   if is-preloaded "${server_binary_tar}" "${server_binary_tar_hash}"; then
@@ -420,6 +576,9 @@ function install-kube-binary-config {
     mv "${src_dir}/kubelet" "${KUBE_BIN}"
     mv "${src_dir}/kubectl" "${KUBE_BIN}"
 
+    # Some older images have LICENSES baked-in as a file. Presumably they will
+    # have the directory baked-in eventually.
+    rm -rf "${KUBE_HOME}"/LICENSES
     mv "${KUBE_HOME}/kubernetes/LICENSES" "${KUBE_HOME}"
     mv "${KUBE_HOME}/kubernetes/kubernetes-src.tar.gz" "${KUBE_HOME}"
   fi
@@ -455,7 +614,7 @@ function install-kube-binary-config {
   # Clean up.
   rm -rf "${KUBE_HOME}/kubernetes"
   rm -f "${KUBE_HOME}/${server_binary_tar}"
-  rm -f "${KUBE_HOME}/${server_binary_tar}.sha1"
+  rm -f "${KUBE_HOME}/${server_binary_tar}.sha512"
 }
 
 ######### Main Function ##########
@@ -465,6 +624,23 @@ set-broken-motd
 
 KUBE_HOME="/home/kubernetes"
 KUBE_BIN="${KUBE_HOME}/bin"
+PYTHON="python"
+
+if [[ "$(python -V 2>&1)" =~ "Python 2" ]]; then
+  # found python2, just use that
+  PYTHON="python"
+elif [[ -f "/usr/bin/python2.7" ]]; then
+  # System python not defaulted to python 2 but using 2.7 during migration
+  PYTHON="/usr/bin/python2.7"
+else
+  # No python2 either by default, let's see if we can find python3
+  PYTHON="python3"
+  if ! command -v ${PYTHON} >/dev/null 2>&1; then
+    echo "ERROR Python not found. Aborting."
+    exit 2
+  fi
+fi
+echo "Version : " $(${PYTHON} -V 2>&1)
 
 # download and source kube-env
 download-kube-env
@@ -476,6 +652,9 @@ download-kubelet-config "${KUBE_HOME}/kubelet-config.yaml"
 if [[ "${KUBERNETES_MASTER:-}" == "true" ]]; then
   download-kube-master-certs
 fi
+
+# ensure chosen container runtime is present
+ensure-container-runtime
 
 # binaries and kube-system manifests
 install-kube-binary-config

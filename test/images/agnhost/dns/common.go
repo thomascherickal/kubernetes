@@ -17,10 +17,8 @@ limitations under the License.
 package dns
 
 import (
-	"bytes"
 	"fmt"
 	"io/ioutil"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,7 +52,7 @@ var CmdEtcHosts = &cobra.Command{
 }
 
 func printDNSSuffixList(cmd *cobra.Command, args []string) {
-	dnsSuffixList := getDNSSuffixList()
+	dnsSuffixList := GetDNSSuffixList()
 	fmt.Println(strings.Join(dnsSuffixList, ","))
 }
 
@@ -74,17 +72,4 @@ func readFile(fileName string) string {
 	}
 
 	return string(fileData)
-}
-
-func runCommand(name string, arg ...string) string {
-	var out bytes.Buffer
-	cmd := exec.Command(name, arg...)
-	cmd.Stdout = &out
-
-	err := cmd.Run()
-	if err != nil {
-		panic(err)
-	}
-
-	return strings.TrimSpace(out.String())
 }

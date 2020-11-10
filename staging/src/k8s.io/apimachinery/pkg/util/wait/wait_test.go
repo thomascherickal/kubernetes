@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/runtime"
 )
 
@@ -692,5 +693,183 @@ func TestContextForChannel(t *testing.T) {
 	case <-done:
 	case <-time.After(ForeverTestTimeout):
 		t.Errorf("unexepcted timeout waiting for parent to cancel child contexts")
+	}
+}
+
+func TestExponentialBackoffManagerGetNextBackoff(t *testing.T) {
+	fc := clock.NewFakeClock(time.Now())
+	backoff := NewExponentialBackoffManager(1, 10, 10, 2.0, 0.0, fc)
+	durations := []time.Duration{1, 2, 4, 8, 10, 10, 10}
+	for i := 0; i < len(durations); i++ {
+		generatedBackoff := backoff.(*exponentialBackoffManagerImpl).getNextBackoff()
+		if generatedBackoff != durations[i] {
+			t.Errorf("unexpected %d-th backoff: %d, expecting %d", i, generatedBackoff, durations[i])
+		}
+	}
+
+	fc.Step(11)
+	resetDuration := backoff.(*exponentialBackoffManagerImpl).getNextBackoff()
+	if resetDuration != 1 {
+		t.Errorf("after reset, backoff should be 1, but got %d", resetDuration)
+	}
+}
+
+func TestJitteredBackoffManagerGetNextBackoff(t *testing.T) {
+	// positive jitter
+	backoffMgr := NewJitteredBackoffManager(1, 1, clock.NewFakeClock(time.Now()))
+	for i := 0; i < 5; i++ {
+		backoff := backoffMgr.(*jitteredBackoffManagerImpl).getNextBackoff()
+		if backoff < 1 || backoff > 2 {
+			t.Errorf("backoff out of range: %d", backoff)
+		}
+	}
+
+	// negative jitter, shall be a fixed backoff
+	backoffMgr = NewJitteredBackoffManager(1, -1, clock.NewFakeClock(time.Now()))
+	backoff := backoffMgr.(*jitteredBackoffManagerImpl).getNextBackoff()
+	if backoff != 1 {
+		t.Errorf("backoff should be 1, but got %d", backoff)
+	}
+}
+
+func TestJitterBackoffManagerWithRealClock(t *testing.T) {
+	backoffMgr := NewJitteredBackoffManager(1*time.Millisecond, 0, &clock.RealClock{})
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		<-backoffMgr.Backoff().C()
+		passed := time.Now().Sub(start)
+		if passed < 1*time.Millisecond {
+			t.Errorf("backoff should be at least 1ms, but got %s", passed.String())
+		}
+	}
+}
+
+func TestExponentialBackoffManagerWithRealClock(t *testing.T) {
+	// backoff at least 1ms, 2ms, 4ms, 8ms, 10ms, 10ms, 10ms
+	durationFactors := []time.Duration{1, 2, 4, 8, 10, 10, 10}
+	backoffMgr := NewExponentialBackoffManager(1*time.Millisecond, 10*time.Millisecond, 1*time.Hour, 2.0, 0.0, &clock.RealClock{})
+
+	for i := range durationFactors {
+		start := time.Now()
+		<-backoffMgr.Backoff().C()
+		passed := time.Now().Sub(start)
+		if passed < durationFactors[i]*time.Millisecond {
+			t.Errorf("backoff should be at least %d ms, but got %s", durationFactors[i], passed.String())
+		}
+	}
+}
+
+func TestExponentialBackoffWithContext(t *testing.T) {
+	defaultCtx := func() context.Context {
+		return context.Background()
+	}
+
+	defaultCallback := func(_ int) (bool, error) {
+		return false, nil
+	}
+
+	conditionErr := errors.New("condition failed")
+
+	tests := []struct {
+		name             string
+		steps            int
+		ctxGetter        func() context.Context
+		callback         func(calls int) (bool, error)
+		attemptsExpected int
+		errExpected      error
+	}{
+		{
+			name:             "no attempts expected with zero backoff steps",
+			steps:            0,
+			ctxGetter:        defaultCtx,
+			callback:         defaultCallback,
+			attemptsExpected: 0,
+			errExpected:      ErrWaitTimeout,
+		},
+		{
+			name:             "condition returns false with single backoff step",
+			steps:            1,
+			ctxGetter:        defaultCtx,
+			callback:         defaultCallback,
+			attemptsExpected: 1,
+			errExpected:      ErrWaitTimeout,
+		},
+		{
+			name:      "condition returns true with single backoff step",
+			steps:     1,
+			ctxGetter: defaultCtx,
+			callback: func(_ int) (bool, error) {
+				return true, nil
+			},
+			attemptsExpected: 1,
+			errExpected:      nil,
+		},
+		{
+			name:             "condition always returns false with multiple backoff steps",
+			steps:            5,
+			ctxGetter:        defaultCtx,
+			callback:         defaultCallback,
+			attemptsExpected: 5,
+			errExpected:      ErrWaitTimeout,
+		},
+		{
+			name:      "condition returns true after certain attempts with multiple backoff steps",
+			steps:     5,
+			ctxGetter: defaultCtx,
+			callback: func(attempts int) (bool, error) {
+				if attempts == 3 {
+					return true, nil
+				}
+				return false, nil
+			},
+			attemptsExpected: 3,
+			errExpected:      nil,
+		},
+		{
+			name:      "condition returns error no further attempts expected",
+			steps:     5,
+			ctxGetter: defaultCtx,
+			callback: func(_ int) (bool, error) {
+				return true, conditionErr
+			},
+			attemptsExpected: 1,
+			errExpected:      conditionErr,
+		},
+		{
+			name:  "context already canceled no attempts expected",
+			steps: 5,
+			ctxGetter: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				return ctx
+			},
+			callback:         defaultCallback,
+			attemptsExpected: 0,
+			errExpected:      context.Canceled,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backoff := Backoff{
+				Duration: 1 * time.Millisecond,
+				Factor:   1.0,
+				Steps:    test.steps,
+			}
+
+			attempts := 0
+			err := ExponentialBackoffWithContext(test.ctxGetter(), backoff, func() (bool, error) {
+				attempts++
+				return test.callback(attempts)
+			})
+
+			if test.errExpected != err {
+				t.Errorf("expected error: %v but got: %v", test.errExpected, err)
+			}
+
+			if test.attemptsExpected != attempts {
+				t.Errorf("expected attempts count: %d but got: %d", test.attemptsExpected, attempts)
+			}
+		})
 	}
 }

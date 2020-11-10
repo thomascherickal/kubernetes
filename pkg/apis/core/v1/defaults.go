@@ -19,11 +19,14 @@ package v1
 import (
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/util/parsers"
 	utilpointer "k8s.io/utils/pointer"
+
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 func addDefaultingFuncs(scheme *runtime.Scheme) error {
@@ -92,6 +95,10 @@ func SetDefaults_Container(obj *v1.Container) {
 	}
 }
 
+func SetDefaults_EphemeralContainer(obj *v1.EphemeralContainer) {
+	SetDefaults_Container((*v1.Container)(&obj.EphemeralContainerCommon))
+}
+
 func SetDefaults_Service(obj *v1.Service) {
 	if obj.Spec.SessionAffinity == "" {
 		obj.Spec.SessionAffinity = v1.ServiceAffinityNone
@@ -127,6 +134,48 @@ func SetDefaults_Service(obj *v1.Service) {
 		obj.Spec.Type == v1.ServiceTypeLoadBalancer) &&
 		obj.Spec.ExternalTrafficPolicy == "" {
 		obj.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyTypeCluster
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
+		// Default obj.Spec.IPFamilyPolicy if we *know* we can, otherwise it will
+		// be handled later in allocation.
+		if obj.Spec.Type != v1.ServiceTypeExternalName {
+			if obj.Spec.IPFamilyPolicy == nil {
+				if len(obj.Spec.ClusterIPs) == 2 || len(obj.Spec.IPFamilies) == 2 {
+					requireDualStack := v1.IPFamilyPolicyRequireDualStack
+					obj.Spec.IPFamilyPolicy = &requireDualStack
+				}
+			}
+
+			// If the user demanded dual-stack, but only specified one family, we add
+			// the other.
+			if obj.Spec.IPFamilyPolicy != nil && *(obj.Spec.IPFamilyPolicy) == v1.IPFamilyPolicyRequireDualStack && len(obj.Spec.IPFamilies) == 1 {
+				if obj.Spec.IPFamilies[0] == v1.IPv4Protocol {
+					obj.Spec.IPFamilies = append(obj.Spec.IPFamilies, v1.IPv6Protocol)
+				} else {
+					obj.Spec.IPFamilies = append(obj.Spec.IPFamilies, v1.IPv4Protocol)
+				}
+
+				// Any other dual-stack defaulting depends on cluster configuration.
+				// Further IPFamilies, IPFamilyPolicy defaulting is in ClusterIP alloc/reserve logic
+				// NOTE: strategy handles cases where ClusterIPs is used (but not ClusterIP).
+			}
+		}
+
+		// any other defaulting depends on cluster configuration.
+		// further IPFamilies, IPFamilyPolicy defaulting is in ClusterIP alloc/reserve logic
+		// note: conversion logic handles cases where ClusterIPs is used (but not ClusterIP).
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.LoadBalancerIPMode) &&
+		obj.Spec.Type == v1.ServiceTypeLoadBalancer {
+		ipMode := v1.LoadBalancerIPModeVIP
+
+		for i, ing := range obj.Status.LoadBalancer.Ingress {
+			if ing.IP != "" && ing.IPMode == nil {
+				obj.Status.LoadBalancer.Ingress[i].IPMode = &ipMode
+			}
+		}
 	}
 }
 func SetDefaults_Pod(obj *v1.Pod) {
@@ -254,9 +303,11 @@ func SetDefaults_PersistentVolumeClaim(obj *v1.PersistentVolumeClaim) {
 	if obj.Status.Phase == "" {
 		obj.Status.Phase = v1.ClaimPending
 	}
-	if obj.Spec.VolumeMode == nil {
-		obj.Spec.VolumeMode = new(v1.PersistentVolumeMode)
-		*obj.Spec.VolumeMode = v1.PersistentVolumeFilesystem
+}
+func SetDefaults_PersistentVolumeClaimSpec(obj *v1.PersistentVolumeClaimSpec) {
+	if obj.VolumeMode == nil {
+		obj.VolumeMode = new(v1.PersistentVolumeMode)
+		*obj.VolumeMode = v1.PersistentVolumeFilesystem
 	}
 }
 func SetDefaults_ISCSIVolumeSource(obj *v1.ISCSIVolumeSource) {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
 	"fmt"
@@ -27,7 +27,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/images"
 	"k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	"k8s.io/kubernetes/test/e2e_node/services"
 
 	"github.com/onsi/ginkgo"
@@ -49,9 +48,9 @@ var _ = framework.KubeDescribe("Container Runtime Conformance Test", func() {
 		}
 	}
 }`
-			// The following images are not added into NodeImageWhiteList, because this test is
+			// The following images are not added into NodePrePullImageList, because this test is
 			// testing image pulling, these images don't need to be prepulled. The ImagePullPolicy
-			// is v1.PullAlways, so it won't be blocked by framework image white list check.
+			// is v1.PullAlways, so it won't be blocked by framework image pre-pull list check.
 			for _, testCase := range []struct {
 				description string
 				image       string
@@ -142,9 +141,9 @@ var _ = framework.KubeDescribe("Container Runtime Conformance Test", func() {
 							break
 						}
 						if i < flakeRetry {
-							e2elog.Logf("No.%d attempt failed: %v, retrying...", i, err)
+							framework.Logf("No.%d attempt failed: %v, retrying...", i, err)
 						} else {
-							e2elog.Failf("All %d attempts failed: %v", flakeRetry, err)
+							framework.Failf("All %d attempts failed: %v", flakeRetry, err)
 						}
 					}
 				})

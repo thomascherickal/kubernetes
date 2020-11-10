@@ -1,4 +1,4 @@
-// +build !linux,!windows linux,!cgo
+// +build !linux,!windows
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -51,6 +51,10 @@ func (cu *cadvisorUnsupported) ContainerInfo(name string, req *cadvisorapi.Conta
 }
 
 func (cu *cadvisorUnsupported) ContainerInfoV2(name string, options cadvisorapiv2.RequestOptions) (map[string]cadvisorapiv2.ContainerInfo, error) {
+	return nil, errUnsupported
+}
+
+func (cu *cadvisorUnsupported) GetRequestedContainersInfo(containerName string, options cadvisorapiv2.RequestOptions) (map[string]*cadvisorapi.ContainerInfo, error) {
 	return nil, errUnsupported
 }
 

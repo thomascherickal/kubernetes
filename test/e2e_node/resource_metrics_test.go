@@ -14,18 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
 	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kubeletresourcemetricsv1alpha1 "k8s.io/kubernetes/pkg/kubelet/apis/resourcemetrics/v1alpha1"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
-	"k8s.io/kubernetes/test/e2e/framework/metrics"
-	"k8s.io/kubernetes/test/e2e/framework/volume"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
+	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
+	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
 
 	"github.com/prometheus/common/model"
 
@@ -41,16 +40,16 @@ const (
 	maxStatsAge = time.Minute
 )
 
-var _ = framework.KubeDescribe("ResourceMetricsAPI", func() {
+var _ = framework.KubeDescribe("ResourceMetricsAPI [NodeFeature:ResourceMetrics]", func() {
 	f := framework.NewDefaultFramework("resource-metrics")
 	ginkgo.Context("when querying /resource/metrics", func() {
 		ginkgo.BeforeEach(func() {
-			ginkgo.By("Creating test pods")
+			ginkgo.By("Creating test pods to measure their resource usage")
 			numRestarts := int32(1)
 			pods := getSummaryTestPods(f, numRestarts, pod0, pod1)
 			f.PodClient().CreateBatch(pods)
 
-			ginkgo.By("Waiting for test pods to restart the desired number of times")
+			ginkgo.By("restarting the containers to ensure container metrics are still being gathered after a container is restarted")
 			gomega.Eventually(func() error {
 				for _, pod := range pods {
 					err := verifyPodRestartCount(f, pod.Name, len(pod.Spec.Containers), numRestarts)
@@ -64,45 +63,46 @@ var _ = framework.KubeDescribe("ResourceMetricsAPI", func() {
 			ginkgo.By("Waiting 15 seconds for cAdvisor to collect 2 stats points")
 			time.Sleep(15 * time.Second)
 		})
-		ginkgo.It("should report resource usage through the v1alpha1 resouce metrics api", func() {
-			ginkgo.By("Fetching node so we can know proper node memory bounds for unconstrained cgroups")
+		ginkgo.It("should report resource usage through the resouce metrics api", func() {
+			ginkgo.By("Fetching node so we can match against an appropriate memory limit")
 			node := getLocalNode(f)
 			memoryCapacity := node.Status.Capacity["memory"]
 			memoryLimit := memoryCapacity.Value()
 
-			matchV1alpha1Expectations := gstruct.MatchAllKeys(gstruct.Keys{
+			matchResourceMetrics := gstruct.MatchAllKeys(gstruct.Keys{
 				"scrape_error": gstruct.Ignore(),
-				"node_cpu_usage_seconds_total": gstruct.MatchAllElements(nodeId, gstruct.Elements{
-					"": boundedSample(1, 1E6),
+				"node_cpu_usage_seconds_total": gstruct.MatchAllElements(nodeID, gstruct.Elements{
+					"": boundedSample(1, 1e6),
 				}),
-				"node_memory_working_set_bytes": gstruct.MatchAllElements(nodeId, gstruct.Elements{
-					"": boundedSample(10*volume.Mb, memoryLimit),
+				"node_memory_working_set_bytes": gstruct.MatchAllElements(nodeID, gstruct.Elements{
+					"": boundedSample(10*e2evolume.Mb, memoryLimit),
 				}),
 
-				"container_cpu_usage_seconds_total": gstruct.MatchElements(containerId, gstruct.IgnoreExtras, gstruct.Elements{
+				"container_cpu_usage_seconds_total": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(0, 100),
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(0, 100),
 				}),
 
-				"container_memory_working_set_bytes": gstruct.MatchAllElements(containerId, gstruct.Elements{
-					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(10*volume.Kb, 80*volume.Mb),
-					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(10*volume.Kb, 80*volume.Mb),
+				"container_memory_working_set_bytes": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
 				}),
 			})
 			ginkgo.By("Giving pods a minute to start up and produce metrics")
-			gomega.Eventually(getV1alpha1ResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchV1alpha1Expectations)
+			gomega.Eventually(getResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchResourceMetrics)
 			ginkgo.By("Ensuring the metrics match the expectations a few more times")
-			gomega.Consistently(getV1alpha1ResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchV1alpha1Expectations)
+			gomega.Consistently(getResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchResourceMetrics)
 		})
 		ginkgo.AfterEach(func() {
 			ginkgo.By("Deleting test pods")
-			f.PodClient().DeleteSync(pod0, &metav1.DeleteOptions{}, 10*time.Minute)
-			f.PodClient().DeleteSync(pod1, &metav1.DeleteOptions{}, 10*time.Minute)
+			var zero int64 = 0
+			f.PodClient().DeleteSync(pod0, metav1.DeleteOptions{GracePeriodSeconds: &zero}, 10*time.Minute)
+			f.PodClient().DeleteSync(pod1, metav1.DeleteOptions{GracePeriodSeconds: &zero}, 10*time.Minute)
 			if !ginkgo.CurrentGinkgoTestDescription().Failed {
 				return
 			}
 			if framework.TestContext.DumpLogsOnFailure {
-				framework.LogFailedContainers(f.ClientSet, f.Namespace.Name, e2elog.Logf)
+				e2ekubectl.LogFailedContainers(f.ClientSet, f.Namespace.Name, framework.Logf)
 			}
 			ginkgo.By("Recording processes in system cgroups")
 			recordSystemCgroupProcesses()
@@ -110,15 +110,16 @@ var _ = framework.KubeDescribe("ResourceMetricsAPI", func() {
 	})
 })
 
-func getV1alpha1ResourceMetrics() (metrics.KubeletMetrics, error) {
-	return metrics.GrabKubeletMetricsWithoutProxy(framework.TestContext.NodeName+":10255", "/metrics/resource/"+kubeletresourcemetricsv1alpha1.Version)
+func getResourceMetrics() (e2emetrics.KubeletMetrics, error) {
+	ginkgo.By("getting stable resource metrics API")
+	return e2emetrics.GrabKubeletMetricsWithoutProxy(framework.TestContext.NodeName+":10255", "/metrics/resource")
 }
 
-func nodeId(element interface{}) string {
+func nodeID(element interface{}) string {
 	return ""
 }
 
-func containerId(element interface{}) string {
+func containerID(element interface{}) string {
 	el := element.(*model.Sample)
 	return fmt.Sprintf("%s::%s::%s", el.Metric["namespace"], el.Metric["pod"], el.Metric["container"])
 }

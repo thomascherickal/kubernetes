@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	v1 "k8s.io/api/core/v1"
 	storage "k8s.io/api/storage/v1"
@@ -40,13 +40,16 @@ import (
 	storagelisters "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/controller"
 	pvtesting "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/testing"
 	pvutil "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/util"
 	vol "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
 )
+
+func init() {
+	klog.InitFlags(nil)
+}
 
 // This is a unit test framework for persistent volume controller.
 // It fills the controller with test claims/volumes and can simulate these
@@ -91,6 +94,11 @@ type controllerTest struct {
 	// Function to call as the test.
 	test testCall
 }
+
+// annSkipLocalStore can be used to mark initial PVs or PVCs that are meant to be added only
+// to the fake apiserver (i.e. available via Get) but not to the local store (i.e. the controller
+// won't have them in its cache).
+const annSkipLocalStore = "pv-testing-skip-local-store"
 
 type testCall func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error
 
@@ -349,6 +357,17 @@ func newVolumeArray(name, capacity, boundToClaimUID, boundToClaimName string, ph
 	}
 }
 
+func withVolumeDeletionTimestamp(pvs []*v1.PersistentVolume) []*v1.PersistentVolume {
+	result := []*v1.PersistentVolume{}
+	for _, pv := range pvs {
+		// Using time.Now() here will cause mismatching deletion timestamps in tests
+		deleteTime := metav1.Date(2020, time.February, 18, 10, 30, 30, 10, time.UTC)
+		pv.SetDeletionTimestamp(&deleteTime)
+		result = append(result, pv)
+	}
+	return result
+}
+
 // newClaim returns a new claim with given attributes
 func newClaim(name, claimUID, capacity, boundToVolume string, phase v1.PersistentVolumeClaimPhase, class *string, annotations ...string) *v1.PersistentVolumeClaim {
 	fs := v1.PersistentVolumeFilesystem
@@ -375,7 +394,7 @@ func newClaim(name, claimUID, capacity, boundToVolume string, phase v1.Persisten
 		},
 	}
 	// Make sure ref.GetReference(claim) works
-	claim.ObjectMeta.SelfLink = testapi.Default.SelfLink("pvc", name)
+	claim.ObjectMeta.SelfLink = "/api/v1/namespaces/" + testNamespace + "/persistentvolumeclaims/" + name
 
 	if len(annotations) > 0 {
 		claim.Annotations = make(map[string]string)
@@ -408,8 +427,12 @@ func newClaimArray(name, claimUID, capacity, boundToVolume string, phase v1.Pers
 	}
 }
 
-// claimWithAnnotation saves given annotation into given claims.
-// Meant to be used to compose claims specified inline in a test.
+// claimWithAnnotation saves given annotation into given claims. Meant to be
+// used to compose claims specified inline in a test.
+// TODO(refactor): This helper function (and other helpers related to claim
+// arrays) could use some cleaning up (most assume an array size of one)-
+// replace with annotateClaim at all callsites. The tests require claimArrays
+// but mostly operate on single claims
 func claimWithAnnotation(name, value string, claims []*v1.PersistentVolumeClaim) []*v1.PersistentVolumeClaim {
 	if claims[0].Annotations == nil {
 		claims[0].Annotations = map[string]string{name: value}
@@ -417,6 +440,16 @@ func claimWithAnnotation(name, value string, claims []*v1.PersistentVolumeClaim)
 		claims[0].Annotations[name] = value
 	}
 	return claims
+}
+
+func annotateClaim(claim *v1.PersistentVolumeClaim, ann map[string]string) *v1.PersistentVolumeClaim {
+	if claim.Annotations == nil {
+		claim.Annotations = map[string]string{}
+	}
+	for key, val := range ann {
+		claim.Annotations[key] = val
+	}
+	return claim
 }
 
 // volumeWithAnnotation saves given annotation into given volume.
@@ -486,7 +519,7 @@ var (
 
 // wrapTestWithPluginCalls returns a testCall that:
 // - configures controller with a volume plugin that implements recycler,
-//   deleter and provisioner. The plugin retunrs provided errors when a volume
+//   deleter and provisioner. The plugin returns provided errors when a volume
 //   is deleted, recycled or provisioned.
 // - calls given testCall
 func wrapTestWithPluginCalls(expectedRecycleCalls, expectedDeleteCalls []error, expectedProvisionCalls []provisionCall, toWrap testCall) testCall {
@@ -521,18 +554,27 @@ func wrapTestWithProvisionCalls(expectedProvisionCalls []provisionCall, toWrap t
 	return wrapTestWithPluginCalls(nil, nil, expectedProvisionCalls, toWrap)
 }
 
+type fakeCSINameTranslator struct{}
+
+func (t fakeCSINameTranslator) GetCSINameFromInTreeName(pluginName string) (string, error) {
+	return "vendor.com/MockCSIDriver", nil
+}
+
+type fakeCSIMigratedPluginManager struct{}
+
+func (t fakeCSIMigratedPluginManager) IsMigrationEnabledForPlugin(pluginName string) bool {
+	return true
+}
+
 // wrapTestWithCSIMigrationProvisionCalls returns a testCall that:
 // - configures controller with a volume plugin that emulates CSI migration
 // - calls given testCall
 func wrapTestWithCSIMigrationProvisionCalls(toWrap testCall) testCall {
+	plugin := &mockVolumePlugin{}
 	return func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
-		plugin := &mockVolumePlugin{
-			isMigratedToCSI: true,
-		}
 		ctrl.volumePluginMgr.InitPlugins([]vol.VolumePlugin{plugin}, nil /* prober */, ctrl)
-		ctrl.csiNameFromIntreeNameHook = func(string) (string, error) {
-			return "vendor.com/MockCSIPlugin", nil
-		}
+		ctrl.translator = fakeCSINameTranslator{}
+		ctrl.csiMigratedPluginManager = fakeCSIMigratedPluginManager{}
 		return toWrap(ctrl, reactor, test)
 	}
 }
@@ -595,9 +637,7 @@ func evaluateTestResults(ctrl *PersistentVolumeController, reactor *pvtesting.Vo
 //    controllerTest.testCall *once*.
 // 3. Compare resulting volumes and claims with expected volumes and claims.
 func runSyncTests(t *testing.T, tests []controllerTest, storageClasses []*storage.StorageClass, pods []*v1.Pod) {
-	for _, test := range tests {
-		klog.V(4).Infof("starting test %q", test.name)
-
+	doit := func(t *testing.T, test controllerTest) {
 		// Initialize the controller
 		client := &fake.Clientset{}
 		ctrl, err := newTestController(client, nil, true)
@@ -606,9 +646,15 @@ func runSyncTests(t *testing.T, tests []controllerTest, storageClasses []*storag
 		}
 		reactor := newVolumeReactor(client, ctrl, nil, nil, test.errors)
 		for _, claim := range test.initialClaims {
+			if metav1.HasAnnotation(claim.ObjectMeta, annSkipLocalStore) {
+				continue
+			}
 			ctrl.claims.Add(claim)
 		}
 		for _, volume := range test.initialVolumes {
+			if metav1.HasAnnotation(volume.ObjectMeta, annSkipLocalStore) {
+				continue
+			}
 			ctrl.volumes.store.Add(volume)
 		}
 		reactor.AddClaims(test.initialClaims)
@@ -624,6 +670,7 @@ func runSyncTests(t *testing.T, tests []controllerTest, storageClasses []*storag
 		podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 		for _, pod := range pods {
 			podIndexer.Add(pod)
+			ctrl.podIndexer.Add(pod)
 		}
 		ctrl.podLister = corelisters.NewPodLister(podIndexer)
 
@@ -640,6 +687,13 @@ func runSyncTests(t *testing.T, tests []controllerTest, storageClasses []*storag
 		}
 
 		evaluateTestResults(ctrl, reactor.VolumeReactor, test, t)
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			doit(t, test)
+		})
 	}
 }
 
@@ -736,7 +790,7 @@ func runMultisyncTests(t *testing.T, tests []controllerTest, storageClasses []*s
 				if err != nil {
 					if err == pvtesting.ErrVersionConflict {
 						// Ignore version errors
-						klog.V(4).Infof("test intentionaly ignores version error.")
+						klog.V(4).Infof("test intentionally ignores version error.")
 					} else {
 						t.Errorf("Error calling syncClaim: %v", err)
 						// Finish the loop on the first error
@@ -753,7 +807,7 @@ func runMultisyncTests(t *testing.T, tests []controllerTest, storageClasses []*s
 				if err != nil {
 					if err == pvtesting.ErrVersionConflict {
 						// Ignore version errors
-						klog.V(4).Infof("test intentionaly ignores version error.")
+						klog.V(4).Infof("test intentionally ignores version error.")
 					} else {
 						t.Errorf("Error calling syncVolume: %v", err)
 						// Finish the loop on the first error
@@ -778,7 +832,6 @@ type mockVolumePlugin struct {
 	deleteCallCounter    int
 	recycleCalls         []error
 	recycleCallCounter   int
-	isMigratedToCSI      bool
 	provisionOptions     vol.VolumeOptions
 }
 
@@ -806,10 +859,6 @@ func (plugin *mockVolumePlugin) GetVolumeName(spec *vol.Spec) (string, error) {
 
 func (plugin *mockVolumePlugin) CanSupport(spec *vol.Spec) bool {
 	return true
-}
-
-func (plugin *mockVolumePlugin) IsMigratedToCSI() bool {
-	return plugin.isMigratedToCSI
 }
 
 func (plugin *mockVolumePlugin) RequiresRemount() bool {

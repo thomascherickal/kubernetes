@@ -42,8 +42,10 @@ import (
 
 func createTestCSR(t *testing.T) (*x509.CertificateRequest, crypto.Signer) {
 	csr, key, err := pkiutil.NewCSRAndKey(
-		&certutil.Config{
-			CommonName: "testCert",
+		&pkiutil.CertConfig{
+			Config: certutil.Config{
+				CommonName: "testCert",
+			},
 		})
 	if err != nil {
 		t.Fatalf("couldn't create test cert: %v", err)
@@ -344,7 +346,7 @@ func TestCreateServiceAccountKeyAndPublicKeyFiles(t *testing.T) {
 				}
 			}
 
-			err := CreateServiceAccountKeyAndPublicKeyFiles(dir)
+			err := CreateServiceAccountKeyAndPublicKeyFiles(dir, x509.RSA)
 			if (err != nil) != tt.expectedErr {
 				t.Fatalf("expected error: %v, got: %v, error: %v", tt.expectedErr, err != nil, err)
 			} else if tt.expectedErr {
@@ -398,6 +400,19 @@ func TestSharedCertificateExists(t *testing.T) {
 				"etcd/ca.key":        caKey,
 			},
 			expectedError: true,
+		},
+		{
+			name: "missing ca.key",
+			files: certstestutil.PKIFiles{
+				"ca.crt":             caCert,
+				"front-proxy-ca.crt": caCert,
+				"front-proxy-ca.key": caKey,
+				"sa.pub":             publicKey,
+				"sa.key":             key,
+				"etcd/ca.crt":        caCert,
+				"etcd/ca.key":        caKey,
+			},
+			expectedError: false,
 		},
 		{
 			name: "missing sa.key",
@@ -640,7 +655,7 @@ func TestValidateMethods(t *testing.T) {
 			name:            "validateCACertAndKey (key missing)",
 			validateFunc:    validateCACertAndKey,
 			loc:             certKeyLocation{caBaseName: "ca", baseName: "", uxName: "CA"},
-			expectedSuccess: false,
+			expectedSuccess: true,
 		},
 		{
 			name: "validateSignedCert",
@@ -664,6 +679,15 @@ func TestValidateMethods(t *testing.T) {
 			loc:             certKeyLocation{baseName: "sa", uxName: "service account"},
 			expectedSuccess: true,
 		},
+		{
+			name: "validatePrivatePublicKey (missing key)",
+			files: certstestutil.PKIFiles{
+				"sa.pub": key.Public(),
+			},
+			validateFunc:    validatePrivatePublicKey,
+			loc:             certKeyLocation{baseName: "sa", uxName: "service account"},
+			expectedSuccess: false,
+		},
 	}
 
 	for _, test := range tests {
@@ -683,7 +707,7 @@ func TestValidateMethods(t *testing.T) {
 }
 
 func TestNewCSR(t *testing.T) {
-	kubeadmCert := KubeadmCertAPIServer
+	kubeadmCert := KubeadmCertAPIServer()
 	cfg := testutil.GetDefaultInternalConfig(t)
 
 	certConfig, err := kubeadmCert.GetConfig(cfg)
@@ -691,7 +715,7 @@ func TestNewCSR(t *testing.T) {
 		t.Fatalf("couldn't get cert config: %v", err)
 	}
 
-	csr, _, err := NewCSR(&kubeadmCert, cfg)
+	csr, _, err := NewCSR(kubeadmCert, cfg)
 
 	if err != nil {
 		t.Errorf("invalid signature on CSR: %v", err)

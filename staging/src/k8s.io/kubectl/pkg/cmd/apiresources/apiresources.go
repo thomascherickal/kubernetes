@@ -29,8 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/printers"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
-	"k8s.io/kubectl/pkg/util/printers"
+	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
@@ -41,6 +42,9 @@ var (
 
 		# Print the supported API Resources with more information
 		kubectl api-resources -o wide
+
+		# Print the supported API Resources sorted by a column
+		kubectl api-resources --sort-by=name
 
 		# Print the supported namespaced resources
 		kubectl api-resources --namespaced=true
@@ -56,6 +60,7 @@ var (
 // As new fields are added, add them here instead of referencing the cmd.Flags()
 type APIResourceOptions struct {
 	Output     string
+	SortBy     string
 	APIGroup   string
 	Namespaced bool
 	Verbs      []string
@@ -67,8 +72,9 @@ type APIResourceOptions struct {
 
 // groupResource contains the APIGroup and APIResource
 type groupResource struct {
-	APIGroup    string
-	APIResource metav1.APIResource
+	APIGroup        string
+	APIGroupVersion string
+	APIResource     metav1.APIResource
 }
 
 // NewAPIResourceOptions creates the options for APIResource
@@ -85,8 +91,8 @@ func NewCmdAPIResources(f cmdutil.Factory, ioStreams genericclioptions.IOStreams
 
 	cmd := &cobra.Command{
 		Use:     "api-resources",
-		Short:   "Print the supported API resources on the server",
-		Long:    "Print the supported API resources on the server",
+		Short:   i18n.T("Print the supported API resources on the server"),
+		Long:    i18n.T("Print the supported API resources on the server"),
 		Example: apiresourcesExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(cmd, args))
@@ -101,6 +107,7 @@ func NewCmdAPIResources(f cmdutil.Factory, ioStreams genericclioptions.IOStreams
 	cmd.Flags().StringVar(&o.APIGroup, "api-group", o.APIGroup, "Limit to resources in the specified API group.")
 	cmd.Flags().BoolVar(&o.Namespaced, "namespaced", o.Namespaced, "If false, non-namespaced resources will be returned, otherwise returning namespaced resources by default.")
 	cmd.Flags().StringSliceVar(&o.Verbs, "verbs", o.Verbs, "Limit to resources that support the specified verbs.")
+	cmd.Flags().StringVar(&o.SortBy, "sort-by", o.SortBy, "If non-empty, sort list of resources using specified field. The field can be either 'name' or 'kind'.")
 	cmd.Flags().BoolVar(&o.Cached, "cached", o.Cached, "Use the cached list of resources if available.")
 	return cmd
 }
@@ -110,6 +117,12 @@ func (o *APIResourceOptions) Validate() error {
 	supportedOutputTypes := sets.NewString("", "wide", "name")
 	if !supportedOutputTypes.Has(o.Output) {
 		return fmt.Errorf("--output %v is not available", o.Output)
+	}
+	supportedSortTypes := sets.NewString("", "name", "kind")
+	if len(o.SortBy) > 0 {
+		if !supportedSortTypes.Has(o.SortBy) {
+			return fmt.Errorf("--sort-by accepts only name or kind")
+		}
 	}
 	return nil
 }
@@ -173,8 +186,9 @@ func (o *APIResourceOptions) RunAPIResources(cmd *cobra.Command, f cmdutil.Facto
 				continue
 			}
 			resources = append(resources, groupResource{
-				APIGroup:    gv.Group,
-				APIResource: resource,
+				APIGroup:        gv.Group,
+				APIGroupVersion: gv.String(),
+				APIResource:     resource,
 			})
 		}
 	}
@@ -185,7 +199,7 @@ func (o *APIResourceOptions) RunAPIResources(cmd *cobra.Command, f cmdutil.Facto
 		}
 	}
 
-	sort.Stable(sortableGroupResource(resources))
+	sort.Stable(sortableResource{resources, o.SortBy})
 	for _, r := range resources {
 		switch o.Output {
 		case "name":
@@ -200,7 +214,7 @@ func (o *APIResourceOptions) RunAPIResources(cmd *cobra.Command, f cmdutil.Facto
 			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%s\t%v\n",
 				r.APIResource.Name,
 				strings.Join(r.APIResource.ShortNames, ","),
-				r.APIGroup,
+				r.APIGroupVersion,
 				r.APIResource.Namespaced,
 				r.APIResource.Kind,
 				r.APIResource.Verbs); err != nil {
@@ -210,7 +224,7 @@ func (o *APIResourceOptions) RunAPIResources(cmd *cobra.Command, f cmdutil.Facto
 			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%s\n",
 				r.APIResource.Name,
 				strings.Join(r.APIResource.ShortNames, ","),
-				r.APIGroup,
+				r.APIGroupVersion,
 				r.APIResource.Namespaced,
 				r.APIResource.Kind); err != nil {
 				errs = append(errs, err)
@@ -225,7 +239,7 @@ func (o *APIResourceOptions) RunAPIResources(cmd *cobra.Command, f cmdutil.Facto
 }
 
 func printContextHeaders(out io.Writer, output string) error {
-	columnNames := []string{"NAME", "SHORTNAMES", "APIGROUP", "NAMESPACED", "KIND"}
+	columnNames := []string{"NAME", "SHORTNAMES", "APIVERSION", "NAMESPACED", "KIND"}
 	if output == "wide" {
 		columnNames = append(columnNames, "VERBS")
 	}
@@ -233,16 +247,31 @@ func printContextHeaders(out io.Writer, output string) error {
 	return err
 }
 
-type sortableGroupResource []groupResource
+type sortableResource struct {
+	resources []groupResource
+	sortBy    string
+}
 
-func (s sortableGroupResource) Len() int      { return len(s) }
-func (s sortableGroupResource) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-func (s sortableGroupResource) Less(i, j int) bool {
-	ret := strings.Compare(s[i].APIGroup, s[j].APIGroup)
+func (s sortableResource) Len() int { return len(s.resources) }
+func (s sortableResource) Swap(i, j int) {
+	s.resources[i], s.resources[j] = s.resources[j], s.resources[i]
+}
+func (s sortableResource) Less(i, j int) bool {
+	ret := strings.Compare(s.compareValues(i, j))
 	if ret > 0 {
 		return false
 	} else if ret == 0 {
-		return strings.Compare(s[i].APIResource.Name, s[j].APIResource.Name) < 0
+		return strings.Compare(s.resources[i].APIResource.Name, s.resources[j].APIResource.Name) < 0
 	}
 	return true
+}
+
+func (s sortableResource) compareValues(i, j int) (string, string) {
+	switch s.sortBy {
+	case "name":
+		return s.resources[i].APIResource.Name, s.resources[j].APIResource.Name
+	case "kind":
+		return s.resources[i].APIResource.Kind, s.resources[j].APIResource.Kind
+	}
+	return s.resources[i].APIGroup, s.resources[j].APIGroup
 }

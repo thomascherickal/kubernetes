@@ -48,13 +48,15 @@ type RestartOptions struct {
 
 	resource.FilenameOptions
 	genericclioptions.IOStreams
+
+	fieldManager string
 }
 
 var (
-	restartLong = templates.LongDesc(`
+	restartLong = templates.LongDesc(i18n.T(`
 		Restart a resource.
 
-	        Resource will be rollout restarted.`)
+	        Resource will be rollout restarted.`))
 
 	restartExample = templates.Examples(`
 		# Restart a deployment
@@ -94,6 +96,7 @@ func NewCmdRolloutRestart(f cmdutil.Factory, streams genericclioptions.IOStreams
 
 	usage := "identifying the resource to get from a server."
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, usage)
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-rollout")
 	o.PrintFlags.AddFlags(cmd)
 	return cmd
 }
@@ -169,7 +172,9 @@ func (o RestartOptions) RunRestart() error {
 			allErrs = append(allErrs, fmt.Errorf("failed to create patch for %v: empty patch", info.Name))
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
+		obj, err := resource.NewHelper(info.Client, info.Mapping).
+			WithFieldManager(o.fieldManager).
+			Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("failed to patch: %v", err))
 			continue

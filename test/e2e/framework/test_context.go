@@ -17,9 +17,12 @@ limitations under the License.
 package framework
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -31,13 +34,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 )
 
 const (
-	defaultHost = "http://127.0.0.1:8080"
+	defaultHost = "https://127.0.0.1:6443"
 
 	// DefaultNumNodes is the number of nodes. If not specified, then number of nodes is auto-detected
 	DefaultNumNodes = -1
@@ -78,11 +81,15 @@ type TestContextType struct {
 	KubeVolumeDir      string
 	CertDir            string
 	Host               string
+	BearerToken        string `datapolicy:"token"`
 	// TODO: Deprecating this over time... instead just use gobindata_util.go , see #23987.
 	RepoRoot                string
 	DockershimCheckpointDir string
 	// ListImages will list off all images that are used then quit
 	ListImages bool
+
+	// ListConformanceTests will list off all conformance tests that are available then quit
+	ListConformanceTests bool
 
 	// Provider identifies the infrastructure provider (gce, gke, aws)
 	Provider string
@@ -114,6 +121,7 @@ type TestContextType struct {
 	ImageServiceEndpoint     string
 	MasterOSDistro           string
 	NodeOSDistro             string
+	NodeOSArch               string
 	VerifyServiceAccount     bool
 	DeleteNamespace          bool
 	DeleteNamespaceOnFailure bool
@@ -150,13 +158,6 @@ type TestContextType struct {
 	FeatureGates map[string]bool
 	// Node e2e specific test context
 	NodeTestContextType
-	// Monitoring solution that is used in current cluster.
-	ClusterMonitoringMode string
-	// Separate Prometheus monitoring deployed in cluster
-	EnablePrometheusMonitoring bool
-
-	// Indicates what path the kubernetes-anywhere is installed on
-	KubernetesAnywherePath string
 
 	// The DNS Domain of the cluster.
 	ClusterDNSDomain string
@@ -166,6 +167,21 @@ type TestContextType struct {
 
 	// The Default IP Family of the cluster ("ipv4" or "ipv6")
 	IPFamily string
+
+	// NonblockingTaints is the comma-delimeted string given by the user to specify taints which should not stop the test framework from running tests.
+	NonblockingTaints string
+
+	// ProgressReportURL is the URL which progress updates will be posted to as tests complete. If empty, no updates are sent.
+	ProgressReportURL string
+
+	// SriovdpConfigMapFile is the path to the ConfigMap to configure the SRIOV device plugin on this host.
+	SriovdpConfigMapFile string
+
+	// SpecSummaryOutput is the file to write ginkgo.SpecSummary objects to as tests complete. Useful for debugging and test introspection.
+	SpecSummaryOutput string
+
+	// DockerConfigFile is a file that contains credentials which can be used to pull images from certain private registries, needed for a test.
+	DockerConfigFile string
 }
 
 // NodeKillerConfig describes configuration of NodeKiller -- a utility to
@@ -234,6 +250,11 @@ type CloudConfig struct {
 // TestContext should be used by all tests to access common context data.
 var TestContext TestContextType
 
+// ClusterIsIPv6 returns true if the cluster is IPv6
+func (tc TestContextType) ClusterIsIPv6() bool {
+	return tc.IPFamily == "ipv6"
+}
+
 // RegisterCommonFlags registers flags common to all e2e test suites.
 // The flag set can be flag.CommandLine (if desired) or a custom
 // flag set that then gets passed to viperconfig.ViperizeFlags.
@@ -270,7 +291,7 @@ func RegisterCommonFlags(flags *flag.FlagSet) {
 	flags.BoolVar(&TestContext.DeleteNamespaceOnFailure, "delete-namespace-on-failure", true, "If true, framework will delete test namespace on failure. Used only during test debugging.")
 	flags.IntVar(&TestContext.AllowedNotReadyNodes, "allowed-not-ready-nodes", 0, "If non-zero, framework will allow for that many non-ready nodes when checking for all ready nodes.")
 
-	flags.StringVar(&TestContext.Host, "host", "", fmt.Sprintf("The host, or apiserver, to connect to. Will default to %s if this argument and --kubeconfig are not set", defaultHost))
+	flags.StringVar(&TestContext.Host, "host", "", fmt.Sprintf("The host, or apiserver, to connect to. Will default to %s if this argument and --kubeconfig are not set.", defaultHost))
 	flags.StringVar(&TestContext.ReportPrefix, "report-prefix", "", "Optional prefix for JUnit XML reports. Default is empty, which doesn't prepend anything to the default name.")
 	flags.StringVar(&TestContext.ReportDir, "report-dir", "", "Path to the directory where the JUnit XML reports should be saved. Default is empty, which doesn't generate these reports.")
 	flags.Var(cliflag.NewMapStringBool(&TestContext.FeatureGates), "feature-gates", "A set of key=value pairs that describe feature gates for alpha/experimental features.")
@@ -282,9 +303,15 @@ func RegisterCommonFlags(flags *flag.FlagSet) {
 	flags.BoolVar(&TestContext.DumpSystemdJournal, "dump-systemd-journal", false, "Whether to dump the full systemd journal.")
 	flags.StringVar(&TestContext.ImageServiceEndpoint, "image-service-endpoint", "", "The image service endpoint of cluster VM instances.")
 	flags.StringVar(&TestContext.DockershimCheckpointDir, "dockershim-checkpoint-dir", "/var/lib/dockershim/sandbox", "The directory for dockershim to store sandbox checkpoints.")
-	flags.StringVar(&TestContext.KubernetesAnywherePath, "kubernetes-anywhere-path", "/workspace/k8s.io/kubernetes-anywhere", "Which directory kubernetes-anywhere is installed to.")
+	flags.StringVar(&TestContext.NonblockingTaints, "non-blocking-taints", `node-role.kubernetes.io/master`, "Nodes with taints in this comma-delimited list will not block the test framework from starting tests.")
 
 	flags.BoolVar(&TestContext.ListImages, "list-images", false, "If true, will show list of images used for runnning tests.")
+	flags.BoolVar(&TestContext.ListConformanceTests, "list-conformance-tests", false, "If true, will show list of conformance tests.")
+	flags.StringVar(&TestContext.KubectlPath, "kubectl-path", "kubectl", "The kubectl binary to use. For development, you might use 'cluster/kubectl.sh' here.")
+
+	flags.StringVar(&TestContext.ProgressReportURL, "progress-report-url", "", "The URL to POST progress updates to as the suite runs to assist in aiding integrations. If empty, no messages sent.")
+	flags.StringVar(&TestContext.SpecSummaryOutput, "spec-dump", "", "The file to dump all ginkgo.SpecSummary to after tests run. If empty, no objects are saved/printed.")
+	flags.StringVar(&TestContext.DockerConfigFile, "docker-config-file", "", "A file that contains credentials which can be used to pull images from certain private registries, needed for a test.")
 }
 
 // RegisterClusterFlags registers flags specific to the cluster e2e test suite.
@@ -299,13 +326,11 @@ func RegisterClusterFlags(flags *flag.FlagSet) {
 	flags.StringVar(&TestContext.RepoRoot, "repo-root", "../../", "Root directory of kubernetes repository, for finding test files.")
 	flags.StringVar(&TestContext.Provider, "provider", "", "The name of the Kubernetes provider (gce, gke, local, skeleton (the fallback if not set), etc.)")
 	flags.StringVar(&TestContext.Tooling, "tooling", "", "The tooling in use (kops, gke, etc.)")
-	flags.StringVar(&TestContext.KubectlPath, "kubectl-path", "kubectl", "The kubectl binary to use. For development, you might use 'cluster/kubectl.sh' here.")
 	flags.StringVar(&TestContext.OutputDir, "e2e-output-dir", "/tmp", "Output directory for interesting/useful test data, like performance data, benchmarks, and other metrics.")
 	flags.StringVar(&TestContext.Prefix, "prefix", "e2e", "A prefix to be added to cloud resources created during testing.")
 	flags.StringVar(&TestContext.MasterOSDistro, "master-os-distro", "debian", "The OS distribution of cluster master (debian, ubuntu, gci, coreos, or custom).")
 	flags.StringVar(&TestContext.NodeOSDistro, "node-os-distro", "debian", "The OS distribution of cluster VM instances (debian, ubuntu, gci, coreos, or custom).")
-	flags.StringVar(&TestContext.ClusterMonitoringMode, "cluster-monitoring-mode", "standalone", "The monitoring solution that is used in the cluster.")
-	flags.BoolVar(&TestContext.EnablePrometheusMonitoring, "prometheus-monitoring", false, "Separate Prometheus monitoring deployed in cluster.")
+	flags.StringVar(&TestContext.NodeOSArch, "node-os-arch", "amd64", "The OS architecture of cluster VM instances (amd64, arm64, or custom).")
 	flags.StringVar(&TestContext.ClusterDNSDomain, "dns-domain", "cluster.local", "The DNS Domain of the cluster.")
 
 	// TODO: Flags per provider?  Rename gce-project/gce-zone?
@@ -326,7 +351,7 @@ func RegisterClusterFlags(flags *flag.FlagSet) {
 	flags.StringVar(&cloudConfig.MasterTag, "master-tag", "", "Network tags used on master instances. Valid only for gce, gke")
 
 	flags.StringVar(&cloudConfig.ClusterTag, "cluster-tag", "", "Tag used to identify resources.  Only required if provider is aws.")
-	flags.StringVar(&cloudConfig.ConfigFile, "cloud-config-file", "", "Cloud config file.  Only required if provider is azure.")
+	flags.StringVar(&cloudConfig.ConfigFile, "cloud-config-file", "", "Cloud config file.  Only required if provider is azure or vsphere.")
 	flags.IntVar(&TestContext.MinStartupPods, "minStartupPods", 0, "The number of pods which we need to see in 'Running' state with a 'Ready' condition of true, before we try running tests. This is useful in any cluster which needs some base pod-based services running before it can be used.")
 	flags.DurationVar(&TestContext.SystemPodsStartupTimeout, "system-pods-startup-timeout", 10*time.Minute, "Timeout for waiting for all system pods to be running before starting tests.")
 	flags.DurationVar(&TestContext.NodeSchedulableTimeout, "node-schedulable-timeout", 30*time.Minute, "Timeout for waiting for all nodes to be schedulable.")
@@ -342,24 +367,6 @@ func RegisterClusterFlags(flags *flag.FlagSet) {
 	flags.DurationVar(&nodeKiller.Interval, "node-killer-interval", 1*time.Minute, "Time between node failures.")
 	flags.Float64Var(&nodeKiller.JitterFactor, "node-killer-jitter-factor", 60, "Factor used to jitter node failures.")
 	flags.DurationVar(&nodeKiller.SimulatedDowntime, "node-killer-simulated-downtime", 10*time.Minute, "A delay between node death and recreation")
-}
-
-// RegisterNodeFlags registers flags specific to the node e2e test suite.
-func RegisterNodeFlags(flags *flag.FlagSet) {
-	// Mark the test as node e2e when node flags are api.Registry.
-	TestContext.NodeE2E = true
-	flags.StringVar(&TestContext.NodeName, "node-name", "", "Name of the node to run tests on.")
-	// TODO(random-liu): Move kubelet start logic out of the test.
-	// TODO(random-liu): Move log fetch logic out of the test.
-	// There are different ways to start kubelet (systemd, initd, docker, manually started etc.)
-	// and manage logs (journald, upstart etc.).
-	// For different situation we need to mount different things into the container, run different commands.
-	// It is hard and unnecessary to deal with the complexity inside the test suite.
-	flags.BoolVar(&TestContext.NodeConformance, "conformance", false, "If true, the test suite will not start kubelet, and fetch system log (kernel, docker, kubelet log etc.) to the report directory.")
-	flags.BoolVar(&TestContext.PrepullImages, "prepull-images", true, "If true, prepull images so image pull failures do not cause test failures.")
-	flags.StringVar(&TestContext.ImageDescription, "image-description", "", "The description of the image which the test will be running on.")
-	flags.StringVar(&TestContext.SystemSpecName, "system-spec-name", "", "The name of the system spec (e.g., gke) that's used in the node e2e test. The system specs are in test/e2e_node/system/specs/. This is used by the test framework to determine which tests to run for validating the system requirements.")
-	flags.Var(cliflag.NewMapStringString(&TestContext.ExtraEnvs), "extra-envs", "The extra environment variables needed for node e2e tests. Format: a list of key=value pairs, e.g., env1=val1,env2=val2")
 }
 
 func createKubeConfig(clientCfg *restclient.Config) *clientcmdapi.Config {
@@ -400,6 +407,21 @@ func createKubeConfig(clientCfg *restclient.Config) *clientcmdapi.Config {
 	return configCmd
 }
 
+// GenerateSecureToken returns a string of length tokenLen, consisting
+// of random bytes encoded as base64 for use as a Bearer Token during
+// communication with an APIServer
+func GenerateSecureToken(tokenLen int) (string, error) {
+	// Number of bytes to be tokenLen when base64 encoded.
+	tokenSize := math.Ceil(float64(tokenLen) * 6 / 8)
+	rawToken := make([]byte, int(tokenSize))
+	if _, err := rand.Read(rawToken); err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(rawToken)
+	token := encoded[:tokenLen]
+	return token, nil
+}
+
 // AfterReadingAllFlags makes changes to the context after all flags
 // have been read.
 func AfterReadingAllFlags(t *TestContextType) {
@@ -419,10 +441,20 @@ func AfterReadingAllFlags(t *TestContextType) {
 			t.Host = defaultHost
 		}
 	}
+	if len(t.BearerToken) == 0 {
+		var err error
+		t.BearerToken, err = GenerateSecureToken(16)
+		if err != nil {
+			klog.Fatalf("Failed to generate bearer token: %v", err)
+		}
+	}
+
 	// Allow 1% of nodes to be unready (statistically) - relevant for large clusters.
 	if t.AllowedNotReadyNodes == 0 {
 		t.AllowedNotReadyNodes = t.CloudConfig.NumNodes / 100
 	}
+
+	klog.Infof("Tolerating taints %q when considering if nodes are ready", TestContext.NonblockingTaints)
 
 	// Make sure that all test runs have a valid TestContext.CloudConfig.Provider.
 	// TODO: whether and how long this code is needed is getting discussed
@@ -430,7 +462,7 @@ func AfterReadingAllFlags(t *TestContextType) {
 	if TestContext.Provider == "" {
 		// Some users of the e2e.test binary pass --provider=.
 		// We need to support that, changing it would break those usages.
-		e2elog.Logf("The --provider flag is not set. Continuing as if --provider=skeleton had been used.")
+		Logf("The --provider flag is not set. Continuing as if --provider=skeleton had been used.")
 		TestContext.Provider = "skeleton"
 	}
 

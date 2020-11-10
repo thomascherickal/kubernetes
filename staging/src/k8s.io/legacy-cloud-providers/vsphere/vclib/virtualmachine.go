@@ -27,7 +27,7 @@ import (
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // VirtualMachine extends the govmomi VirtualMachine object
@@ -168,7 +168,6 @@ func (vm *VirtualMachine) AttachDisk(ctx context.Context, vmDiskPath string, vol
 
 // DetachDisk detaches the disk specified by vmDiskPath
 func (vm *VirtualMachine) DetachDisk(ctx context.Context, vmDiskPath string) error {
-	vmDiskPath = RemoveStorageClusterORFolderNameFromVDiskPath(vmDiskPath)
 	device, err := vm.getVirtualDeviceByPath(ctx, vmDiskPath)
 	if err != nil {
 		klog.Errorf("Disk ID not found for VM: %q with diskPath: %q", vm.InventoryPath, vmDiskPath)

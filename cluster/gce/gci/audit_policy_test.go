@@ -26,9 +26,9 @@ import (
 	auditinstall "k8s.io/apiserver/pkg/apis/audit/install"
 	auditpkg "k8s.io/apiserver/pkg/audit"
 	auditpolicy "k8s.io/apiserver/pkg/audit/policy"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,8 +52,12 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	defer c.tearDown()
 
 	// Initialize required environment variables.
-	const kubeEnvTmpl = `readonly KUBE_HOME={{.KubeHome}}`
-	c.mustInvokeFunc(kubeEnvTmpl, kubeAPIServerEnv{KubeHome: c.kubeHome})
+	c.mustInvokeFunc(
+		kubeAPIServerEnv{KubeHome: c.kubeHome},
+		[]string{"configure-helper.sh"},
+		"base.template",
+		"testdata/kube-apiserver/base.template",
+	)
 
 	policy, err := auditpolicy.LoadPolicyFromFile(policyFile)
 	require.NoError(t, err, "Failed to load generated policy.")

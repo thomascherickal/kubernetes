@@ -14,6 +14,7 @@ metadata:
     "7": "8"
   managedFields:
   - apiVersion: "17"
+    fieldsType: "18"
     manager: "16"
     operation: 鐊唊飙Ş-U圴÷a/ɔ}摁(湗Ć]
   name: "2"
@@ -29,31 +30,52 @@ metadata:
   selfLink: "5"
   uid: "7"
 spec:
+  behavior:
+    scaleDown:
+      policies:
+      - periodSeconds: 1505972335
+        type: VƋZ1Ůđ眊ľǎɳ,ǿ飏
+        value: 2040455355
+      selectPolicy: 褎weǇèux
+      stabilizationWindowSeconds: -342705708
+    scaleUp:
+      policies:
+      - periodSeconds: 1048864116
+        type: ȫ焗捏ĨFħ籘Àǒɿʒ刽
+        value: 427196286
+      selectPolicy: Ƿ裚瓶釆Ɗ+j忊
+      stabilizationWindowSeconds: -648954478
   maxReplicas: -1971381490
   metrics:
-  - external:
+  - containerResource:
+      container: "39"
+      name: Ɋł/擇ɦĽ胚O醔ɍ厶耈 
+      target:
+        averageUtilization: -1105572246
+        averageValue: "151"
+        type: 禒Ƙá腿ħ缶.蒅
+        value: "999"
+    external:
       metric:
-        name: "38"
+        name: "40"
         selector:
           matchExpressions:
-          - key: n3-8d-0-5qty--4-p---u16-wv-i.84-n4f--139-295at-o7qff7-x--r7v66bm71u-n4f0/2_31.-.-yz-0-_p4mz--.I_f6kjsz-7lwY-Y93-x6bigm_-._q
-            operator: In
-            values:
-            - Q3_Y.5.-..P_pDZ-._._t__2k
+          - key: 1-1-x1z-j4kh6oqu-or---40--87-1wp6.759s-3------6tv27r-m8w-6-9-35d383-iq-ay1z25-3-vj73d/Y.t--_0..--_6yV07-_.___gO-d.iUaCw
+            operator: DoesNotExist
           matchLabels:
-            9s-m---vl80.5-6y-07b-3---g-jdi/z_-tY-R6S17_.8CnK_O.d-._NwcGnP-w-Sf5_Or.i1_7z.WH-.._d: 1_57__JR.N-1zL-4--6o--Bo-F__..XR.7_1-l
+            wcGnP-w-Sf5_O1: "1_70"
       target:
-        averageUtilization: -521487971
-        averageValue: "301"
-        type: 3.v-鿧悮坮Ȣ
-        value: "82"
+        averageUtilization: 747521320
+        averageValue: "799"
+        type: ʣy豎@ɀ羭,铻OŤ
+        value: "830"
     object:
       describedObject:
-        apiVersion: "23"
-        kind: "21"
-        name: "22"
+        apiVersion: "24"
+        kind: "22"
+        name: "23"
       metric:
-        name: "24"
+        name: "25"
         selector:
           matchExpressions:
           - key: 816m59-dx8----i--5-8t36b0/D7r__.am6-4_WE-_JTrcd-2.-__E_Sv__26KX_R7
@@ -67,7 +89,7 @@ spec:
         value: "309"
     pods:
       metric:
-        name: "31"
+        name: "32"
         selector:
           matchExpressions:
           - key: w.__-___196-.dX_iv1H.__.h-J-M.9_T.q-o7.y-SQ.A
@@ -91,69 +113,76 @@ spec:
     type: 枊a8衍`Ĩɘ.蘯6ċV夸eɑeʤ脽ě
   minReplicas: 896585016
   scaleTargetRef:
-    apiVersion: "20"
-    kind: "18"
-    name: "19"
+    apiVersion: "21"
+    kind: "19"
+    name: "20"
 status:
   conditions:
-  - lastTransitionTime: "2039-12-25T06:58:01Z"
-    message: "70"
-    reason: "69"
-    status: ɸĻo:{柯?B俋¬h`職铳s44矕Ƈ
-    type: Ƚȿ醏g遧
+  - lastTransitionTime: "2026-05-26T09:35:23Z"
+    message: "73"
+    reason: "72"
+    status: ƱÁR»淹揀
+    type: 44矕
   currentMetrics:
-  - external:
+  - containerResource:
+      container: "64"
       current:
-        averageUtilization: -1726456869
-        averageValue: "909"
-        value: "108"
+        averageUtilization: -1945921250
+        averageValue: "394"
+        value: "77"
+      name: 腂ǂǚŜEuEy
+    external:
+      current:
+        averageUtilization: 1928526133
+        averageValue: "797"
+        value: "444"
       metric:
-        name: "62"
+        name: "65"
         selector:
           matchExpressions:
-          - key: 7pdn--j2---25/I._31-_I-A-_3b6
-            operator: Exists
-          matchLabels:
-            Z: C..7o_x3..-.8-Jp-9-4-Tm.__G-8...__.Q_c8.G.b_91
-    object:
-      current:
-        averageUtilization: 1980459939
-        averageValue: "289"
-        value: "861"
-      describedObject:
-        apiVersion: "54"
-        kind: "52"
-        name: "53"
-      metric:
-        name: "45"
-        selector:
-          matchExpressions:
-          - key: rR4_7FA.2
+          - key: n_H-.___._D8.TS-jJ.Ys_Mop34_-2
             operator: DoesNotExist
           matchLabels:
-            990-17-hg1-o-p665--4-j8---t6-r7---d--uml-89.n0v-1o-0hv--k6/0_OHz_.B-.-_w_--.8_r_N-.3n-x.-_-_-Nm-_X3.1d_YH3x---5: s2oy
-    pods:
+            Tvw39F_C-rtSY.g._2F7.-_e..Or_-.3OHgt._U.-x_rC9..__-6_k.N-2B_Ve: fh4.caTz_.g.w-o.8_WT-M.3_-1y_8E
+    object:
       current:
-        averageUtilization: 1333166203
-        averageValue: "638"
-        value: "485"
-      metric:
+        averageUtilization: -1666319281
+        averageValue: "472"
+        value: "124"
+      describedObject:
+        apiVersion: "56"
+        kind: "54"
         name: "55"
+      metric:
+        name: "47"
         selector:
           matchExpressions:
-          - key: 1q5--uk5mj-94-8134i5k6q6--5tu-tie4-7--gm4p-83.91z---883d-vj/z.-_Z4.A
+          - key: Dp665O_4Gj._BXt.O-7___-Y_um-_8r--684._-_188
             operator: NotIn
             values:
-            - G.-_pP__up.2L_s-o779._-k-5___-Qq..csh-3--Z1Tvw39F_C-t
+            - XK5._..O_.J_-G_--V-42E_--o90G_A4..-L..-__0N_N.O30-_u._-2T
           matchLabels:
-            7-gg93--5-------g1c-fr4/mQ.GM72_-c-.-.6--3-___t-Z8SUGP.-_.uB-.--.gb_2_-8-----yJY.__-X2: 0_.GgT7_7B_D-..-.k4u-zA_--_.-.6GA26C-s.Nj-d-E
+            hA9..9__Y-H-Mqpt._.-_..05c.---qy-_5_S.d5a3Jb: 46g_4....1..jtFe8b_A_..P1s-V.9.4..9..c_uo3Pa__n-Di
+    pods:
+      current:
+        averageUtilization: -1050824692
+        averageValue: "328"
+        value: "378"
+      metric:
+        name: "57"
+        selector:
+          matchExpressions:
+          - key: 4ds4-4tz9x--j.1l11q5--uk5mj-94-8134i5k6q6--5tu-tie4-7--gm4p-8y-9-te5/H._____K_g1cXfr.4_.-_-_-...1py_8-3..s._.x.2K_2qu_0S-CqWD
+            operator: Exists
+          matchLabels:
+            5.-_--.VEa-_gn.8-c.3: F._oX-F9_.5vN5.25aWx.2aM214_.-C
     resource:
       current:
-        averageUtilization: -280562323
-        averageValue: "886"
-        value: "826"
-      name: ɻ;襕ċ桉桃喕
-    type: 矀Kʝ瘴I\p[ħsĨɆâĺɗŹ倗S
-  currentReplicas: 1761963371
-  desiredReplicas: 645599318
-  observedGeneration: -6706242512760583856
+        averageUtilization: 1190831814
+        averageValue: "653"
+        value: "113"
+      name: 反-n覦灲閈誹ʅ蕉ɼ搳ǭ濑箨ʨ
+    type: 0Ƹ[Ęİ榌U
+  currentReplicas: 474119379
+  desiredReplicas: 1923334396
+  observedGeneration: -115578794491385044

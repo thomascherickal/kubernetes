@@ -65,8 +65,9 @@ func (openrc OpenRCInitSystem) ServiceIsEnabled(service string) bool {
 // ServiceIsActive ensures the service is running, or attempting to run. (crash looping in the case of kubelet)
 func (openrc OpenRCInitSystem) ServiceIsActive(service string) bool {
 	args := []string{service, "status"}
-	outBytes, _ := exec.Command("rc-service", args...).Output()
-	return !strings.Contains(string(outBytes), "stopped")
+	outBytes, _ := exec.Command("rc-service", args...).CombinedOutput()
+	outStr := string(outBytes)
+	return !strings.Contains(outStr, "stopped") && !strings.Contains(outStr, "does not exist")
 }
 
 // EnableCommand return a string describing how to enable a service
@@ -82,7 +83,7 @@ func (sysd SystemdInitSystem) EnableCommand(service string) string {
 	return fmt.Sprintf("systemctl enable %s.service", service)
 }
 
-// reloadSystemd reloeads the systemd daemon
+// reloadSystemd reloads the systemd daemon
 func (sysd SystemdInitSystem) reloadSystemd() error {
 	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
 		return fmt.Errorf("failed to reload systemd: %v", err)
@@ -121,20 +122,14 @@ func (sysd SystemdInitSystem) ServiceExists(service string) bool {
 	args := []string{"status", service}
 	outBytes, _ := exec.Command("systemctl", args...).Output()
 	output := string(outBytes)
-	if strings.Contains(output, "Loaded: not-found") {
-		return false
-	}
-	return true
+	return !strings.Contains(output, "Loaded: not-found")
 }
 
 // ServiceIsEnabled ensures the service is enabled to start on each boot.
 func (sysd SystemdInitSystem) ServiceIsEnabled(service string) bool {
 	args := []string{"is-enabled", service}
 	err := exec.Command("systemctl", args...).Run()
-	if err != nil {
-		return false
-	}
-	return true
+	return err == nil
 }
 
 // ServiceIsActive will check is the service is "active". In the case of

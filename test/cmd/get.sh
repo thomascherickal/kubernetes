@@ -96,11 +96,7 @@ run_kubectl_get_tests() {
   # Post-condition: POD abc should error since it doesn't exist
   kube::test::if_has_string "${output_message}" 'pods "abc" not found'
   # Post-condition: make sure we don't display an empty List
-  if kube::test::if_has_string "${output_message}" 'List'; then
-    echo 'Unexpected List output'
-    echo "${LINENO} $(basename "$0")"
-    exit 1
-  fi
+  kube::test::if_has_not_string "${output_message}" 'List'
 
   ### Test kubectl get all
   output_message=$(kubectl --v=6 --namespace default get all --chunk-size=0 2>&1 "${kube_flags[@]}")
@@ -210,8 +206,8 @@ run_kubectl_get_tests() {
   kubectl delete pods redis-master valid-pod "${kube_flags[@]}"
 
   ### Test 'kubectl get -k <dir>' prints all the items built from a kustomization directory
-  # Pre-condition: no ConfigMap, Deployment, Service exist
-  kube::test::get_object_assert configmaps "{{range.items}}{{$id_field}}:{{end}}" ''
+  # Pre-Condition: No configmaps with name=test-the-map, no Deployment, Service exist
+  kube::test::get_object_assert 'configmaps --field-selector=metadata.name=test-the-map' "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" ''
   kube::test::get_object_assert services "{{range.items}}{{$id_field}}:{{end}}" ''
   # Command
@@ -228,7 +224,7 @@ run_kubectl_get_tests() {
   kubectl delete -k hack/testdata/kustomize
 
   # Check that all items in the list are deleted
-  kube::test::get_object_assert configmaps "{{range.items}}{{$id_field}}:{{end}}" ''
+  kube::test::get_object_assert 'configmaps --field-selector=metadata.name=test-the-map' "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" ''
   kube::test::get_object_assert services "{{range.items}}{{$id_field}}:{{end}}" ''
 

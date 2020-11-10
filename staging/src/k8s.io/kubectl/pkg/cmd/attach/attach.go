@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,15 +41,15 @@ import (
 
 var (
 	attachExample = templates.Examples(i18n.T(`
-		# Get output from running pod 123456-7890, using the first container by default
-		kubectl attach 123456-7890
+		# Get output from running pod mypod, using the first container by default
+		kubectl attach mypod
 
-		# Get output from ruby-container from pod 123456-7890
-		kubectl attach 123456-7890 -c ruby-container
+		# Get output from ruby-container from pod mypod
+		kubectl attach mypod -c ruby-container
 
-		# Switch to raw terminal mode, sends stdin to 'bash' in ruby-container from pod 123456-7890
+		# Switch to raw terminal mode, sends stdin to 'bash' in ruby-container from pod mypod
 		# and sends stdout/stderr from 'bash' back to the client
-		kubectl attach 123456-7890 -c ruby-container -i -t
+		kubectl attach mypod -c ruby-container -i -t
 
 		# Get output from the first pod of a ReplicaSet named nginx
 		kubectl attach rs/nginx
@@ -103,7 +103,7 @@ func NewCmdAttach(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra
 		Use:                   "attach (POD | TYPE/NAME) -c CONTAINER",
 		DisableFlagsInUseLine: true,
 		Short:                 i18n.T("Attach to a running container"),
-		Long:                  "Attach to a process that is already running inside an existing container.",
+		Long:                  i18n.T("Attach to a process that is already running inside an existing container."),
 		Example:               attachExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
@@ -320,6 +320,11 @@ func (o *AttachOptions) containerToAttachTo(pod *corev1.Pod) (*corev1.Container,
 		for i := range pod.Spec.InitContainers {
 			if pod.Spec.InitContainers[i].Name == o.ContainerName {
 				return &pod.Spec.InitContainers[i], nil
+			}
+		}
+		for i := range pod.Spec.EphemeralContainers {
+			if pod.Spec.EphemeralContainers[i].Name == o.ContainerName {
+				return (*corev1.Container)(&pod.Spec.EphemeralContainers[i].EphemeralContainerCommon), nil
 			}
 		}
 		return nil, fmt.Errorf("container not found (%s)", o.ContainerName)

@@ -167,22 +167,6 @@ func (m *testMetricsProvider) NewRetriesMetric(name string) CounterMetric {
 	return &m.retries
 }
 
-func TestSinceInMicroseconds(t *testing.T) {
-	mp := testMetricsProvider{}
-	c := clock.NewFakeClock(time.Now())
-	mf := queueMetricsFactory{metricsProvider: &mp}
-	m := mf.newQueueMetrics("test", c)
-	dqm := m.(*defaultQueueMetrics)
-
-	for _, i := range []int{1, 50, 100, 500, 1000, 10000, 100000, 1000000} {
-		n := c.Now()
-		c.Step(time.Duration(i) * time.Microsecond)
-		if e, a := float64(i), dqm.sinceInMicroseconds(n); e != a {
-			t.Errorf("Expected %v, got %v", e, a)
-		}
-	}
-}
-
 func TestMetrics(t *testing.T) {
 	mp := testMetricsProvider{}
 	t0 := time.Unix(0, 0)
@@ -268,13 +252,17 @@ func TestMetrics(t *testing.T) {
 	// use a channel to ensure we don't look at the metric before it's
 	// been set.
 	ch := make(chan struct{}, 1)
+	longestCh := make(chan struct{}, 1)
 	mp.unfinished.notifyCh = ch
+	mp.longest.notifyCh = longestCh
 	c.Step(time.Millisecond)
 	<-ch
 	mp.unfinished.notifyCh = nil
 	if e, a := .001, mp.unfinished.gaugeValue(); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}
+	<-longestCh
+	mp.longest.notifyCh = nil
 	if e, a := .001, mp.longest.gaugeValue(); e != a {
 		t.Errorf("expected %v, got %v", e, a)
 	}

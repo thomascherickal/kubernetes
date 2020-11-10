@@ -25,10 +25,10 @@ import (
 	"time"
 
 	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/component-base/version"
 	"k8s.io/kubernetes/pkg/probe"
-	"k8s.io/kubernetes/pkg/version"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	utilio "k8s.io/utils/io"
 )
 
@@ -101,6 +101,14 @@ func DoHTTPProbe(url *url.URL, headers http.Header, client GetHTTPInterface) (pr
 		v := version.Get()
 		headers.Set("User-Agent", fmt.Sprintf("kube-probe/%s.%s", v.Major, v.Minor))
 	}
+	if _, ok := headers["Accept"]; !ok {
+		// Accept header was not defined. accept all
+		headers.Set("Accept", "*/*")
+	}
+	if headers.Get("Accept") == "" {
+		// Accept header was overridden but is empty. removing
+		headers.Del("Accept")
+	}
 	req.Header = headers
 	if headers.Get("Host") != "" {
 		req.Host = headers.Get("Host")
@@ -113,7 +121,11 @@ func DoHTTPProbe(url *url.URL, headers http.Header, client GetHTTPInterface) (pr
 	defer res.Body.Close()
 	b, err := utilio.ReadAtMost(res.Body, maxRespBodyLength)
 	if err != nil {
-		return probe.Failure, "", err
+		if err == utilio.ErrLimitReached {
+			klog.V(4).Infof("Non fatal body truncation for %s, Response: %v", url.String(), *res)
+		} else {
+			return probe.Failure, "", err
+		}
 	}
 	body := string(b)
 	if res.StatusCode >= http.StatusOK && res.StatusCode < http.StatusBadRequest {

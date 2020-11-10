@@ -215,6 +215,10 @@ func v1FuzzerFuncs(codecs runtimeserializer.CodecFactory) []interface{} {
 				j.Finalizers = nil
 			}
 		},
+		func(j *metav1.ResourceVersionMatch, c fuzz.Continue) {
+			matches := []metav1.ResourceVersionMatch{"", metav1.ResourceVersionMatchExact, metav1.ResourceVersionMatchNotOlderThan}
+			*j = matches[c.Rand.Intn(len(matches))]
+		},
 		func(j *metav1.ListMeta, c fuzz.Continue) {
 			j.ResourceVersion = strconv.FormatUint(c.RandUint64(), 10)
 			j.SelfLink = c.RandString()
@@ -272,7 +276,7 @@ func v1FuzzerFuncs(codecs runtimeserializer.CodecFactory) []interface{} {
 		},
 		func(j *metav1.ManagedFieldsEntry, c fuzz.Continue) {
 			c.FuzzNoCustom(j)
-			j.Fields = nil
+			j.FieldsV1 = nil
 		},
 	}
 }

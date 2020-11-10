@@ -25,7 +25,7 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/kubelet/apis/podresources/v1alpha1"
+	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 )
 
 type mockProvider struct {
@@ -40,6 +40,10 @@ func (m *mockProvider) GetPods() []*v1.Pod {
 func (m *mockProvider) GetDevices(podUID, containerName string) []*v1alpha1.ContainerDevices {
 	args := m.Called(podUID, containerName)
 	return args.Get(0).([]*v1alpha1.ContainerDevices)
+}
+
+func (m *mockProvider) UpdateAllocatedDevices() {
+	m.Called()
 }
 
 func TestListPodResources(t *testing.T) {
@@ -140,6 +144,7 @@ func TestListPodResources(t *testing.T) {
 			m := new(mockProvider)
 			m.On("GetPods").Return(tc.pods)
 			m.On("GetDevices", string(podUID), containerName).Return(tc.devices)
+			m.On("UpdateAllocatedDevices").Return()
 			server := NewPodResourcesServer(m, m)
 			resp, err := server.List(context.TODO(), &v1alpha1.ListPodResourcesRequest{})
 			if err != nil {

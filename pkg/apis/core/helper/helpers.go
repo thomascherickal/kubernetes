@@ -267,7 +267,10 @@ func IsIntegerResourceName(str string) bool {
 // IsServiceIPSet aims to check if the service's ClusterIP is set or not
 // the objective is not to perform validation here
 func IsServiceIPSet(service *core.Service) bool {
-	return service.Spec.ClusterIP != core.ClusterIPNone && service.Spec.ClusterIP != ""
+	// This function assumes that the service is semantically validated
+	// it does not test if the IP is valid, just makes sure that it is set.
+	return len(service.Spec.ClusterIP) > 0 &&
+		service.Spec.ClusterIP != core.ClusterIPNone
 }
 
 var standardFinalizers = sets.NewString(
@@ -279,34 +282,6 @@ var standardFinalizers = sets.NewString(
 // IsStandardFinalizerName checks if the input string is a standard finalizer name
 func IsStandardFinalizerName(str string) bool {
 	return standardFinalizers.Has(str)
-}
-
-// LoadBalancerStatusEqual checks if the status of the load balancer is equal to the target status
-// TODO: make method on LoadBalancerStatus?
-func LoadBalancerStatusEqual(l, r *core.LoadBalancerStatus) bool {
-	return ingressSliceEqual(l.Ingress, r.Ingress)
-}
-
-func ingressSliceEqual(lhs, rhs []core.LoadBalancerIngress) bool {
-	if len(lhs) != len(rhs) {
-		return false
-	}
-	for i := range lhs {
-		if !ingressEqual(&lhs[i], &rhs[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func ingressEqual(lhs, rhs *core.LoadBalancerIngress) bool {
-	if lhs.IP != rhs.IP {
-		return false
-	}
-	if lhs.Hostname != rhs.Hostname {
-		return false
-	}
-	return true
 }
 
 // GetAccessModesAsString returns a string representation of an array of access modes.

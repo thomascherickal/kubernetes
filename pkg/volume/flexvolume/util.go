@@ -21,8 +21,9 @@ import (
 	"fmt"
 	"os"
 
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
+
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 )
@@ -139,7 +140,7 @@ func prepareForMount(mounter mount.Interface, deviceMountPath string) (bool, err
 // Mounts the device at the given path.
 // It is expected that prepareForMount has been called before.
 func doMount(mounter mount.Interface, devicePath, deviceMountPath, fsType string, options []string) error {
-	err := mounter.Mount(devicePath, deviceMountPath, fsType, options)
+	err := mounter.MountSensitiveWithoutSystemd(devicePath, deviceMountPath, fsType, options, nil)
 	if err != nil {
 		klog.Errorf("Failed to mount the volume at %s, device: %s, error: %s", deviceMountPath, devicePath, err.Error())
 		return err

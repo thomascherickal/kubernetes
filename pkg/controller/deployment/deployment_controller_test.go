@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	extensions "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,7 +42,6 @@ import (
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	_ "k8s.io/kubernetes/pkg/apis/policy/install"
 	_ "k8s.io/kubernetes/pkg/apis/rbac/install"
-	_ "k8s.io/kubernetes/pkg/apis/settings/install"
 	_ "k8s.io/kubernetes/pkg/apis/storage/install"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/deployment/util"
@@ -330,7 +329,7 @@ func TestDontSyncDeploymentsWithEmptyPodSelector(t *testing.T) {
 	f.objects = append(f.objects, d)
 
 	// Normally there should be a status update to sync observedGeneration but the fake
-	// deployment has no generation set so there is no action happpening here.
+	// deployment has no generation set so there is no action happening here.
 	f.run(testutil.GetKey(d, t))
 }
 

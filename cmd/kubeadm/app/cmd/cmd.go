@@ -67,7 +67,8 @@ func NewKubeadmCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 			    You can then repeat the second step on as many other machines as you like.
 
 		`),
-
+		SilenceErrors: true,
+		SilenceUsage:  true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if rootfsPath != "" {
 				if err := kubeadmutil.Chroot(rootfsPath); err != nil {
@@ -80,17 +81,20 @@ func NewKubeadmCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 
 	cmds.ResetFlags()
 
-	cmds.AddCommand(NewCmdCompletion(out, ""))
-	cmds.AddCommand(NewCmdConfig(out))
-	cmds.AddCommand(NewCmdInit(out, nil))
-	cmds.AddCommand(NewCmdJoin(out, nil))
-	cmds.AddCommand(NewCmdReset(in, out, nil))
-	cmds.AddCommand(NewCmdVersion(out))
-	cmds.AddCommand(NewCmdToken(out, err))
+	cmds.AddCommand(newCmdCompletion(out, ""))
+	cmds.AddCommand(newCmdConfig(out))
+	cmds.AddCommand(newCmdInit(out, nil))
+	cmds.AddCommand(newCmdJoin(out, nil))
+	cmds.AddCommand(newCmdReset(in, out, nil))
+	cmds.AddCommand(newCmdVersion(out))
+	cmds.AddCommand(newCmdToken(out, err))
 	cmds.AddCommand(upgrade.NewCmdUpgrade(out))
 	cmds.AddCommand(alpha.NewCmdAlpha(in, out))
-
 	options.AddKubeadmOtherFlags(cmds.PersistentFlags(), &rootfsPath)
+
+	// TODO: remove "certs" from "alpha"
+	// https://github.com/kubernetes/kubeadm/issues/2291
+	cmds.AddCommand(alpha.NewCmdCertsUtility(out))
 
 	return cmds
 }

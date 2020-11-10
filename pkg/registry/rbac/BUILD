@@ -39,7 +39,6 @@ filegroup(
         ":package-srcs",
         "//pkg/registry/rbac/clusterrole:all-srcs",
         "//pkg/registry/rbac/clusterrolebinding:all-srcs",
-        "//pkg/registry/rbac/reconciliation:all-srcs",
         "//pkg/registry/rbac/rest:all-srcs",
         "//pkg/registry/rbac/role:all-srcs",
         "//pkg/registry/rbac/rolebinding:all-srcs",
@@ -57,5 +56,7 @@ go_test(
         "//pkg/apis/core/helper:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/runtime:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//vendor/github.com/google/gofuzz:go_default_library",
     ],
 )

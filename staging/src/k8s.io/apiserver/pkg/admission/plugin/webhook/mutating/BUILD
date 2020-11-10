@@ -13,7 +13,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//staging/src/k8s.io/api/admission/v1:go_default_library",
-        "//staging/src/k8s.io/api/admissionregistration/v1beta1:go_default_library",
+        "//staging/src/k8s.io/api/admissionregistration/v1:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/api/equality:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/unstructured:go_default_library",
@@ -28,11 +28,11 @@ go_library(
         "//staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/errors:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/generic:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/request:go_default_library",
-        "//staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/util:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/apis/audit:go_default_library",
         "//staging/src/k8s.io/apiserver/pkg/util/webhook:go_default_library",
+        "//staging/src/k8s.io/apiserver/pkg/warning:go_default_library",
         "//vendor/github.com/evanphx/json-patch:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
         "//vendor/k8s.io/utils/trace:go_default_library",
     ],
 )

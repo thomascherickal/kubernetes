@@ -44,6 +44,7 @@ spec:
       containers:
       - name: metadata-proxy
         image: k8s.gcr.io/metadata-proxy:v0.1.12
+        args: ["--addr=0.0.0.0:988"]
         securityContext:
           privileged: true
         # Request and limit resources to get guaranteed QoS.
@@ -84,5 +85,5 @@ spec:
       # END_PROMETHEUS_TO_SD
       nodeSelector:
         cloud.google.com/metadata-proxy-ready: "true"
-        beta.kubernetes.io/os: linux
+        kubernetes.io/os: linux
       terminationGracePeriodSeconds: 30

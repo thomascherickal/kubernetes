@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2014 The Kubernetes Authors.
 
@@ -27,7 +29,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilsets "k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/network/hostport"
@@ -271,18 +273,20 @@ func GetPodIPs(execer utilexec.Interface, nsenterPath, netnsPath, interfaceName 
 		return []net.IP{ip}, nil
 	}
 
-	list := make([]net.IP, 0)
-	var err4, err6 error
-	if ipv4, err4 := getOnePodIP(execer, nsenterPath, netnsPath, interfaceName, "-4"); err4 != nil {
-		list = append(list, ipv4)
-	}
-
-	if ipv6, err6 := getOnePodIP(execer, nsenterPath, netnsPath, interfaceName, "-6"); err6 != nil {
-		list = append(list, ipv6)
+	var (
+		list []net.IP
+		errs []error
+	)
+	for _, addrType := range []string{"-4", "-6"} {
+		if ip, err := getOnePodIP(execer, nsenterPath, netnsPath, interfaceName, addrType); err == nil {
+			list = append(list, ip)
+		} else {
+			errs = append(errs, err)
+		}
 	}
 
 	if len(list) == 0 {
-		return nil, utilerrors.NewAggregate([]error{err4, err6})
+		return nil, utilerrors.NewAggregate(errs)
 	}
 	return list, nil
 
@@ -378,18 +382,25 @@ func (pm *PluginManager) podUnlock(fullPodName string) {
 
 // recordOperation records operation and duration
 func recordOperation(operation string, start time.Time) {
+	metrics.NetworkPluginOperations.WithLabelValues(operation).Inc()
 	metrics.NetworkPluginOperationsLatency.WithLabelValues(operation).Observe(metrics.SinceInSeconds(start))
-	metrics.DeprecatedNetworkPluginOperationsLatency.WithLabelValues(operation).Observe(metrics.SinceInMicroseconds(start))
+}
+
+// recordError records errors for metric.
+func recordError(operation string) {
+	metrics.NetworkPluginOperationsErrors.WithLabelValues(operation).Inc()
 }
 
 func (pm *PluginManager) GetPodNetworkStatus(podNamespace, podName string, id kubecontainer.ContainerID) (*PodNetworkStatus, error) {
-	defer recordOperation("get_pod_network_status", time.Now())
+	const operation = "get_pod_network_status"
+	defer recordOperation(operation, time.Now())
 	fullPodName := kubecontainer.BuildPodFullName(podName, podNamespace)
 	pm.podLock(fullPodName).Lock()
 	defer pm.podUnlock(fullPodName)
 
 	netStatus, err := pm.plugin.GetPodNetworkStatus(podNamespace, podName, id)
 	if err != nil {
+		recordError(operation)
 		return nil, fmt.Errorf("networkPlugin %s failed on the status hook for pod %q: %v", pm.plugin.Name(), fullPodName, err)
 	}
 
@@ -397,13 +408,15 @@ func (pm *PluginManager) GetPodNetworkStatus(podNamespace, podName string, id ku
 }
 
 func (pm *PluginManager) SetUpPod(podNamespace, podName string, id kubecontainer.ContainerID, annotations, options map[string]string) error {
-	defer recordOperation("set_up_pod", time.Now())
+	const operation = "set_up_pod"
+	defer recordOperation(operation, time.Now())
 	fullPodName := kubecontainer.BuildPodFullName(podName, podNamespace)
 	pm.podLock(fullPodName).Lock()
 	defer pm.podUnlock(fullPodName)
 
 	klog.V(3).Infof("Calling network plugin %s to set up pod %q", pm.plugin.Name(), fullPodName)
 	if err := pm.plugin.SetUpPod(podNamespace, podName, id, annotations, options); err != nil {
+		recordError(operation)
 		return fmt.Errorf("networkPlugin %s failed to set up pod %q network: %v", pm.plugin.Name(), fullPodName, err)
 	}
 
@@ -411,13 +424,15 @@ func (pm *PluginManager) SetUpPod(podNamespace, podName string, id kubecontainer
 }
 
 func (pm *PluginManager) TearDownPod(podNamespace, podName string, id kubecontainer.ContainerID) error {
-	defer recordOperation("tear_down_pod", time.Now())
+	const operation = "tear_down_pod"
+	defer recordOperation(operation, time.Now())
 	fullPodName := kubecontainer.BuildPodFullName(podName, podNamespace)
 	pm.podLock(fullPodName).Lock()
 	defer pm.podUnlock(fullPodName)
 
 	klog.V(3).Infof("Calling network plugin %s to tear down pod %q", pm.plugin.Name(), fullPodName)
 	if err := pm.plugin.TearDownPod(podNamespace, podName, id); err != nil {
+		recordError(operation)
 		return fmt.Errorf("networkPlugin %s failed to teardown pod %q network: %v", pm.plugin.Name(), fullPodName, err)
 	}
 

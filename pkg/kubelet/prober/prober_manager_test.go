@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/probe"
@@ -58,6 +58,8 @@ func TestAddRemovePods(t *testing.T) {
 				Name: "no_probe1",
 			}, {
 				Name: "no_probe2",
+			}, {
+				Name: "no_probe3",
 			}},
 		},
 	}
@@ -68,15 +70,20 @@ func TestAddRemovePods(t *testing.T) {
 		},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{{
-				Name: "no_probe1",
+				Name: "probe1",
 			}, {
 				Name:           "readiness",
 				ReadinessProbe: defaultProbe,
 			}, {
-				Name: "no_probe2",
+				Name: "probe2",
 			}, {
 				Name:          "liveness",
 				LivenessProbe: defaultProbe,
+			}, {
+				Name: "probe3",
+			}, {
+				Name:         "startup",
+				StartupProbe: defaultProbe,
 			}},
 		},
 	}
@@ -98,6 +105,7 @@ func TestAddRemovePods(t *testing.T) {
 	probePaths := []probeKey{
 		{"probe_pod", "readiness", readiness},
 		{"probe_pod", "liveness", liveness},
+		{"probe_pod", "startup", startup},
 	}
 	if err := expectProbes(m, probePaths); err != nil {
 		t.Error(err)
@@ -139,6 +147,9 @@ func TestCleanupPods(t *testing.T) {
 			}, {
 				Name:          "prober2",
 				LivenessProbe: defaultProbe,
+			}, {
+				Name:         "prober3",
+				StartupProbe: defaultProbe,
 			}},
 		},
 	}
@@ -153,6 +164,9 @@ func TestCleanupPods(t *testing.T) {
 			}, {
 				Name:          "prober2",
 				LivenessProbe: defaultProbe,
+			}, {
+				Name:         "prober3",
+				StartupProbe: defaultProbe,
 			}},
 		},
 	}
@@ -166,10 +180,12 @@ func TestCleanupPods(t *testing.T) {
 	removedProbes := []probeKey{
 		{"pod_cleanup", "prober1", readiness},
 		{"pod_cleanup", "prober2", liveness},
+		{"pod_cleanup", "prober3", startup},
 	}
 	expectedProbes := []probeKey{
 		{"pod_keep", "prober1", readiness},
 		{"pod_keep", "prober2", liveness},
+		{"pod_keep", "prober3", startup},
 	}
 	if err := waitForWorkerExit(m, removedProbes); err != nil {
 		t.Fatal(err)
@@ -188,6 +204,7 @@ func TestCleanupRepeated(t *testing.T) {
 				Name:           "prober1",
 				ReadinessProbe: defaultProbe,
 				LivenessProbe:  defaultProbe,
+				StartupProbe:   defaultProbe,
 			}},
 		},
 	}
@@ -233,6 +250,20 @@ func TestUpdatePodStatus(t *testing.T) {
 			Running: &v1.ContainerStateRunning{},
 		},
 	}
+	notStartedNoReadiness := v1.ContainerStatus{
+		Name:        "not_started_container_no_readiness",
+		ContainerID: "test://not_started_container_no_readiness_id",
+		State: v1.ContainerState{
+			Running: &v1.ContainerStateRunning{},
+		},
+	}
+	startedNoReadiness := v1.ContainerStatus{
+		Name:        "started_container_no_readiness",
+		ContainerID: "test://started_container_no_readiness_id",
+		State: v1.ContainerState{
+			Running: &v1.ContainerStateRunning{},
+		},
+	}
 	terminated := v1.ContainerStatus{
 		Name:        "terminated_container",
 		ContainerID: "test://terminated_container_id",
@@ -243,7 +274,7 @@ func TestUpdatePodStatus(t *testing.T) {
 	podStatus := v1.PodStatus{
 		Phase: v1.PodRunning,
 		ContainerStatuses: []v1.ContainerStatus{
-			unprobed, probedReady, probedPending, probedUnready, terminated,
+			unprobed, probedReady, probedPending, probedUnready, notStartedNoReadiness, startedNoReadiness, terminated,
 		},
 	}
 
@@ -252,24 +283,29 @@ func TestUpdatePodStatus(t *testing.T) {
 
 	// Setup probe "workers" and cached results.
 	m.workers = map[probeKey]*worker{
-		{testPodUID, unprobed.Name, liveness}:       {},
-		{testPodUID, probedReady.Name, readiness}:   {},
-		{testPodUID, probedPending.Name, readiness}: {},
-		{testPodUID, probedUnready.Name, readiness}: {},
-		{testPodUID, terminated.Name, readiness}:    {},
+		{testPodUID, unprobed.Name, liveness}:             {},
+		{testPodUID, probedReady.Name, readiness}:         {},
+		{testPodUID, probedPending.Name, readiness}:       {},
+		{testPodUID, probedUnready.Name, readiness}:       {},
+		{testPodUID, notStartedNoReadiness.Name, startup}: {},
+		{testPodUID, startedNoReadiness.Name, startup}:    {},
+		{testPodUID, terminated.Name, readiness}:          {},
 	}
 	m.readinessManager.Set(kubecontainer.ParseContainerID(probedReady.ContainerID), results.Success, &v1.Pod{})
 	m.readinessManager.Set(kubecontainer.ParseContainerID(probedUnready.ContainerID), results.Failure, &v1.Pod{})
+	m.startupManager.Set(kubecontainer.ParseContainerID(startedNoReadiness.ContainerID), results.Success, &v1.Pod{})
 	m.readinessManager.Set(kubecontainer.ParseContainerID(terminated.ContainerID), results.Success, &v1.Pod{})
 
 	m.UpdatePodStatus(testPodUID, &podStatus)
 
 	expectedReadiness := map[probeKey]bool{
-		{testPodUID, unprobed.Name, readiness}:      true,
-		{testPodUID, probedReady.Name, readiness}:   true,
-		{testPodUID, probedPending.Name, readiness}: false,
-		{testPodUID, probedUnready.Name, readiness}: false,
-		{testPodUID, terminated.Name, readiness}:    false,
+		{testPodUID, unprobed.Name, readiness}:              true,
+		{testPodUID, probedReady.Name, readiness}:           true,
+		{testPodUID, probedPending.Name, readiness}:         false,
+		{testPodUID, probedUnready.Name, readiness}:         false,
+		{testPodUID, notStartedNoReadiness.Name, readiness}: false,
+		{testPodUID, startedNoReadiness.Name, readiness}:    true,
+		{testPodUID, terminated.Name, readiness}:            false,
 	}
 	for _, c := range podStatus.ContainerStatuses {
 		expected, ok := expectedReadiness[probeKey{testPodUID, c.Name, readiness}]

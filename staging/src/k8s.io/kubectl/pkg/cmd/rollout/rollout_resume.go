@@ -49,15 +49,17 @@ type ResumeOptions struct {
 
 	resource.FilenameOptions
 	genericclioptions.IOStreams
+
+	fieldManager string
 }
 
 var (
-	resumeLong = templates.LongDesc(`
+	resumeLong = templates.LongDesc(i18n.T(`
 		Resume a paused resource
 
 		Paused resources will not be reconciled by a controller. By resuming a
 		resource, we allow it to be reconciled again.
-		Currently only deployments support being resumed.`)
+		Currently only deployments support being resumed.`))
 
 	resumeExample = templates.Examples(`
 		# Resume an already paused deployment
@@ -94,6 +96,7 @@ func NewCmdRolloutResume(f cmdutil.Factory, streams genericclioptions.IOStreams)
 
 	usage := "identifying the resource to get from a server."
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, usage)
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-rollout")
 	o.PrintFlags.AddFlags(cmd)
 	return cmd
 }
@@ -177,7 +180,9 @@ func (o ResumeOptions) RunResume() error {
 			continue
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
+		obj, err := resource.NewHelper(info.Client, info.Mapping).
+			WithFieldManager(o.fieldManager).
+			Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("failed to patch: %v", err))
 			continue

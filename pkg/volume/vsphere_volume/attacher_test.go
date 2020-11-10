@@ -22,17 +22,17 @@ import (
 	"errors"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 	"k8s.io/legacy-cloud-providers/vsphere/vclib"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 func TestGetDeviceName_Volume(t *testing.T) {
-	plugin := newPlugin()
+	plugin := newPlugin(t)
 	volPath := "[local] volumes/test"
 	spec := createVolSpec(volPath)
 
@@ -46,7 +46,7 @@ func TestGetDeviceName_Volume(t *testing.T) {
 }
 
 func TestGetDeviceName_PersistentVolume(t *testing.T) {
-	plugin := newPlugin()
+	plugin := newPlugin(t)
 	volPath := "[local] volumes/test"
 	spec := createPVSpec(volPath)
 
@@ -166,8 +166,8 @@ func TestAttachDetach(t *testing.T) {
 
 // newPlugin creates a new vsphereVolumePlugin with fake cloud, NewAttacher
 // and NewDetacher won't work.
-func newPlugin() *vsphereVolumePlugin {
-	host := volumetest.NewFakeVolumeHost("/tmp", nil, nil)
+func newPlugin(t *testing.T) *vsphereVolumePlugin {
+	host := volumetest.NewFakeVolumeHost(t, "/tmp", nil, nil)
 	plugins := ProbeVolumePlugins()
 	plugin := plugins[0]
 	plugin.Init(host)
@@ -285,29 +285,29 @@ func (testcase *testcase) DetachDisk(diskName string, nodeName types.NodeName) e
 	return expected.ret
 }
 
-func (testcase *testcase) DiskIsAttached(diskName string, nodeName types.NodeName) (bool, error) {
+func (testcase *testcase) DiskIsAttached(diskName string, nodeName types.NodeName) (bool, string, error) {
 	expected := &testcase.diskIsAttached
 
 	if expected.diskName == "" && expected.nodeName == "" {
 		// testcase.diskIsAttached looks uninitialized, test did not expect to
 		// call DiskIsAttached
 		testcase.t.Errorf("Unexpected DiskIsAttached call!")
-		return false, errors.New("Unexpected DiskIsAttached call!")
+		return false, diskName, errors.New("Unexpected DiskIsAttached call!")
 	}
 
 	if expected.diskName != diskName {
 		testcase.t.Errorf("Unexpected DiskIsAttached call: expected diskName %s, got %s", expected.diskName, diskName)
-		return false, errors.New("Unexpected DiskIsAttached call: wrong diskName")
+		return false, diskName, errors.New("Unexpected DiskIsAttached call: wrong diskName")
 	}
 
 	if expected.nodeName != nodeName {
 		testcase.t.Errorf("Unexpected DiskIsAttached call: expected nodeName %s, got %s", expected.nodeName, nodeName)
-		return false, errors.New("Unexpected DiskIsAttached call: wrong nodeName")
+		return false, diskName, errors.New("Unexpected DiskIsAttached call: wrong nodeName")
 	}
 
 	klog.V(4).Infof("DiskIsAttached call: %s, %s, returning %v, %v", diskName, nodeName, expected.isAttached, expected.ret)
 
-	return expected.isAttached, expected.ret
+	return expected.isAttached, diskName, expected.ret
 }
 
 func (testcase *testcase) DisksAreAttached(nodeVolumes map[types.NodeName][]string) (map[types.NodeName]map[string]bool, error) {

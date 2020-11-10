@@ -14,18 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
 	"fmt"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e_node/perf/workloads"
 
 	"github.com/onsi/ginkgo"
@@ -49,14 +51,15 @@ func setKubeletConfig(f *framework.Framework, cfg *kubeletconfig.KubeletConfigur
 
 	// Wait for the Kubelet to be ready.
 	gomega.Eventually(func() bool {
-		nodeList := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
-		return len(nodeList.Items) == 1
+		nodes, err := e2enode.TotalReady(f.ClientSet)
+		framework.ExpectNoError(err)
+		return nodes == 1
 	}, time.Minute, time.Second).Should(gomega.BeTrue())
 }
 
 // Serial because the test updates kubelet configuration.
 // Slow by design.
-var _ = SIGDescribe("Node Performance Testing [Serial] [Slow] [Flaky]", func() {
+var _ = SIGDescribe("Node Performance Testing [Serial] [Slow]", func() {
 	f := framework.NewDefaultFramework("node-performance-testing")
 	var (
 		wl     workloads.NodePerfWorkload
@@ -79,7 +82,16 @@ var _ = SIGDescribe("Node Performance Testing [Serial] [Slow] [Flaky]", func() {
 		delOpts := metav1.DeleteOptions{
 			GracePeriodSeconds: &gp,
 		}
-		f.PodClient().DeleteSync(pod.Name, &delOpts, framework.DefaultPodDeletionTimeout)
+		f.PodClient().DeleteSync(pod.Name, delOpts, framework.DefaultPodDeletionTimeout)
+
+		// We are going to give some more time for the CPU manager to do any clean
+		// up it needs to do now that the pod has been deleted. Otherwise we may
+		// run into a data race condition in which the PostTestExec function
+		// deletes the CPU manager's checkpoint file while the CPU manager is still
+		// doing work and we end with a new checkpoint file after PosttestExec has
+		// finished. This issues would result in the kubelet panicking after we try
+		// and set the kubelet config.
+		time.Sleep(15 * time.Second)
 		ginkgo.By("running the post test exec from the workload")
 		err := wl.PostTestExec()
 		framework.ExpectNoError(err)
@@ -98,8 +110,23 @@ var _ = SIGDescribe("Node Performance Testing [Serial] [Slow] [Flaky]", func() {
 		framework.ExpectNoError(err)
 		perf, err := wl.ExtractPerformanceFromLogs(podLogs)
 		framework.ExpectNoError(err)
-		e2elog.Logf("Time to complete workload %s: %v", wl.Name(), perf)
+		framework.Logf("Time to complete workload %s: %v", wl.Name(), perf)
 	}
+
+	ginkgo.BeforeEach(func() {
+		ginkgo.By("ensure environment has enough CPU + Memory to run")
+		minimumRequiredCPU := resource.MustParse("15")
+		minimumRequiredMemory := resource.MustParse("48Gi")
+		localNodeCap := getLocalNode(f).Status.Allocatable
+		cpuCap := localNodeCap[v1.ResourceCPU]
+		memCap := localNodeCap[v1.ResourceMemory]
+		if cpuCap.Cmp(minimumRequiredCPU) == -1 {
+			e2eskipper.Skipf("Skipping Node Performance Tests due to lack of CPU. Required %v is less than capacity %v.", minimumRequiredCPU, cpuCap)
+		}
+		if memCap.Cmp(minimumRequiredMemory) == -1 {
+			e2eskipper.Skipf("Skipping Node Performance Tests due to lack of memory. Required %v is less than capacity %v.", minimumRequiredMemory, memCap)
+		}
+	})
 
 	ginkgo.Context("Run node performance testing with pre-defined workloads", func() {
 		ginkgo.BeforeEach(func() {

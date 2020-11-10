@@ -17,6 +17,7 @@ limitations under the License.
 package admissionwebhook
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -40,7 +41,7 @@ import (
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -168,6 +169,8 @@ type holder struct {
 
 	t *testing.T
 
+	warningHandler *warningHandler
+
 	recordGVR       metav1.GroupVersionResource
 	recordOperation string
 	recordNamespace string
@@ -202,6 +205,7 @@ func (h *holder) reset(t *testing.T) {
 	h.expectOldObject = false
 	h.expectOptionsGVK = schema.GroupVersionKind{}
 	h.expectOptions = false
+	h.warningHandler.reset()
 
 	// Set up the recorded map with nil records for all combinations
 	h.recorded = map[webhookOptions]*admissionRequest{}
@@ -214,8 +218,8 @@ func (h *holder) reset(t *testing.T) {
 	}
 }
 func (h *holder) expect(gvr schema.GroupVersionResource, gvk, optionsGVK schema.GroupVersionKind, operation v1beta1.Operation, name, namespace string, object, oldObject, options bool) {
-	// Special-case namespaces, since the object name shows up in request attributes for update/delete requests
-	if len(namespace) == 0 && gvk.Group == "" && gvk.Version == "v1" && gvk.Kind == "Namespace" && operation != v1beta1.Create {
+	// Special-case namespaces, since the object name shows up in request attributes
+	if len(namespace) == 0 && gvk.Group == "" && gvk.Version == "v1" && gvk.Kind == "Namespace" {
 		namespace = name
 	}
 
@@ -230,6 +234,7 @@ func (h *holder) expect(gvr schema.GroupVersionResource, gvk, optionsGVK schema.
 	h.expectOldObject = oldObject
 	h.expectOptionsGVK = optionsGVK
 	h.expectOptions = options
+	h.warningHandler.reset()
 
 	// Set up the recorded map with nil records for all combinations
 	h.recorded = map[webhookOptions]*admissionRequest{}
@@ -313,13 +318,15 @@ func (h *holder) verify(t *testing.T) {
 	defer h.lock.Unlock()
 
 	for options, value := range h.recorded {
-		if err := h.verifyRequest(options.converted, value); err != nil {
+		if err := h.verifyRequest(options, value); err != nil {
 			t.Errorf("version: %v, phase:%v, converted:%v error: %v", options.version, options.phase, options.converted, err)
 		}
 	}
 }
 
-func (h *holder) verifyRequest(converted bool, request *admissionRequest) error {
+func (h *holder) verifyRequest(webhookOptions webhookOptions, request *admissionRequest) error {
+	converted := webhookOptions.converted
+
 	// Check if current resource should be exempted from Admission processing
 	if admissionExemptResources[gvr(h.recordGVR.Group, h.recordGVR.Version, h.recordGVR.Resource)] {
 		if request == nil {
@@ -356,6 +363,10 @@ func (h *holder) verifyRequest(converted bool, request *admissionRequest) error 
 		return fmt.Errorf("unexpected options: %#v", request.Options.Object)
 	}
 
+	if !h.warningHandler.hasWarning(makeWarning(webhookOptions.version, webhookOptions.phase, webhookOptions.converted)) {
+		return fmt.Errorf("no warning received from webhook")
+	}
+
 	return nil
 }
 
@@ -383,6 +394,34 @@ func (h *holder) verifyOptions(options runtime.Object) error {
 	return nil
 }
 
+type warningHandler struct {
+	lock     sync.Mutex
+	warnings map[string]bool
+}
+
+func (w *warningHandler) reset() {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+	w.warnings = map[string]bool{}
+}
+func (w *warningHandler) hasWarning(warning string) bool {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+	return w.warnings[warning]
+}
+func makeWarning(version string, phase string, converted bool) string {
+	return fmt.Sprintf("%v/%v/%v", version, phase, converted)
+}
+
+func (w *warningHandler) HandleWarningHeader(code int, agent string, message string) {
+	if code != 299 || len(message) == 0 {
+		return
+	}
+	w.lock.Lock()
+	defer w.lock.Unlock()
+	w.warnings[message] = true
+}
+
 // TestWebhookAdmissionWithWatchCache tests communication between API server and webhook process.
 func TestWebhookAdmissionWithWatchCache(t *testing.T) {
 	testWebhookAdmission(t, true)
@@ -398,6 +437,7 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 	// holder communicates expectations to webhooks, and results from webhooks
 	holder := &holder{
 		t:                 t,
+		warningHandler:    &warningHandler{warnings: map[string]bool{}},
 		gvrToConvertedGVR: map[metav1.GroupVersionResource]metav1.GroupVersionResource{},
 		gvrToConvertedGVK: map[metav1.GroupVersionResource]schema.GroupVersionKind{},
 	}
@@ -439,8 +479,9 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 		// turn off admission plugins that add finalizers
 		"--disable-admission-plugins=ServiceAccount,StorageObjectInUseProtection",
 		// force enable all resources so we can check storage.
-		// TODO: drop these once we stop allowing them to be served.
-		"--runtime-config=api/all=true,extensions/v1beta1/deployments=true,extensions/v1beta1/daemonsets=true,extensions/v1beta1/replicasets=true,extensions/v1beta1/podsecuritypolicies=true,extensions/v1beta1/networkpolicies=true",
+		"--runtime-config=api/all=true",
+		// enable feature-gates that protect resources to check their storage, too.
+		"--feature-gates=EphemeralContainers=true",
 	}, etcdConfig)
 	defer server.TearDownFn()
 
@@ -451,6 +492,7 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 	clientConfig := rest.CopyConfig(server.ClientConfig)
 	clientConfig.Impersonate.UserName = testClientUsername
 	clientConfig.Impersonate.Groups = []string{"system:masters", "system:authenticated"}
+	clientConfig.WarningHandler = holder.warningHandler
 	client, err := clientset.NewForConfig(clientConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -459,7 +501,7 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 	// create CRDs
 	etcd.CreateTestCRDs(t, apiextensionsclientset.NewForConfigOrDie(server.ClientConfig), false, etcd.GetCustomResourceDefinitionData()...)
 
-	if _, err := client.CoreV1().Namespaces().Create(&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}); err != nil {
+	if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -566,6 +608,9 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 	// Allow the webhook to establish
 	time.Sleep(time.Second)
 
+	start := time.Now()
+	count := 0
+
 	// Test admission on all resources, subresources, and verbs
 	for _, gvr := range gvrsToTest {
 		resource := resourcesByGVR[gvr]
@@ -573,6 +618,7 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 			for _, verb := range []string{"create", "update", "patch", "connect", "delete", "deletecollection"} {
 				if shouldTestResourceVerb(gvr, resource, verb) {
 					t.Run(verb, func(t *testing.T) {
+						count++
 						holder.reset(t)
 						testFunc := getTestFunc(gvr, verb)
 						testFunc(&testContext{
@@ -591,6 +637,12 @@ func testWebhookAdmission(t *testing.T, watchCache bool) {
 			}
 		})
 	}
+
+	duration := time.Since(start)
+	perResourceDuration := time.Duration(int(duration) / count)
+	if perResourceDuration >= 150*time.Millisecond {
+		t.Errorf("expected resources to process in < 150ms, average was %v", perResourceDuration)
+	}
 }
 
 //
@@ -608,7 +660,7 @@ func testResourceCreate(c *testContext) {
 		ns = testNamespace
 	}
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkCreateOptions, v1beta1.Create, stubObj.GetName(), ns, true, false, true)
-	_, err = c.client.Resource(c.gvr).Namespace(ns).Create(stubObj, metav1.CreateOptions{})
+	_, err = c.client.Resource(c.gvr).Namespace(ns).Create(context.TODO(), stubObj, metav1.CreateOptions{})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -623,7 +675,7 @@ func testResourceUpdate(c *testContext) {
 		}
 		obj.SetAnnotations(map[string]string{"update": "true"})
 		c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkUpdateOptions, v1beta1.Update, obj.GetName(), obj.GetNamespace(), true, true, true)
-		_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Update(obj, metav1.UpdateOptions{})
+		_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Update(context.TODO(), obj, metav1.UpdateOptions{})
 		return err
 	}); err != nil {
 		c.t.Error(err)
@@ -639,6 +691,7 @@ func testResourcePatch(c *testContext) {
 	}
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkUpdateOptions, v1beta1.Update, obj.GetName(), obj.GetNamespace(), true, true, true)
 	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Patch(
+		context.TODO(),
 		obj.GetName(),
 		types.MergePatchType,
 		[]byte(`{"metadata":{"annotations":{"patch":"true"}}}`),
@@ -659,7 +712,7 @@ func testResourceDelete(c *testContext) {
 	background := metav1.DeletePropagationBackground
 	zero := int64(0)
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkDeleteOptions, v1beta1.Delete, obj.GetName(), obj.GetNamespace(), false, true, true)
-	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(obj.GetName(), &metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
+	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(context.TODO(), obj.GetName(), metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -668,8 +721,8 @@ func testResourceDelete(c *testContext) {
 
 	// wait for the item to be gone
 	err = wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
-		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		if err == nil {
@@ -694,6 +747,7 @@ func testResourceDelete(c *testContext) {
 	// because some resource (e.g., events) do not support garbage
 	// collector finalizers.
 	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Patch(
+		context.TODO(),
 		obj.GetName(),
 		types.MergePatchType,
 		[]byte(`{"metadata":{"finalizers":["test/k8s.io"]}}`),
@@ -703,7 +757,7 @@ func testResourceDelete(c *testContext) {
 		return
 	}
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkDeleteOptions, v1beta1.Delete, obj.GetName(), obj.GetNamespace(), false, true, true)
-	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(obj.GetName(), &metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
+	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(context.TODO(), obj.GetName(), metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -712,7 +766,7 @@ func testResourceDelete(c *testContext) {
 
 	// wait other finalizers (e.g., crd's customresourcecleanup finalizer) to be removed.
 	err = wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
-		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
+		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -726,9 +780,14 @@ func testResourceDelete(c *testContext) {
 		}
 		return true, nil
 	})
+	if err != nil {
+		c.t.Error(err)
+		return
+	}
 
 	// remove the finalizer
 	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Patch(
+		context.TODO(),
 		obj.GetName(),
 		types.MergePatchType,
 		[]byte(`{"metadata":{"finalizers":[]}}`),
@@ -739,8 +798,8 @@ func testResourceDelete(c *testContext) {
 	}
 	// wait for the item to be gone
 	err = wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
-		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		if err == nil {
@@ -766,6 +825,7 @@ func testResourceDeletecollection(c *testContext) {
 
 	// update the object with a label that matches our selector
 	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Patch(
+		context.TODO(),
 		obj.GetName(),
 		types.MergePatchType,
 		[]byte(`{"metadata":{"labels":{"webhooktest":"true"}}}`),
@@ -779,7 +839,7 @@ func testResourceDeletecollection(c *testContext) {
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkDeleteOptions, v1beta1.Delete, "", obj.GetNamespace(), false, true, true)
 
 	// delete
-	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).DeleteCollection(&metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background}, metav1.ListOptions{LabelSelector: "webhooktest=true"})
+	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).DeleteCollection(context.TODO(), metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background}, metav1.ListOptions{LabelSelector: "webhooktest=true"})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -787,8 +847,8 @@ func testResourceDeletecollection(c *testContext) {
 
 	// wait for the item to be gone
 	err = wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
-		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		obj, err := c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		if err == nil {
@@ -831,7 +891,7 @@ func testSubresourceUpdate(c *testContext) {
 
 		// If the subresource supports get, fetch that as the object to submit (namespaces/finalize, */scale, etc)
 		if sets.NewString(c.resource.Verbs...).Has("get") {
-			submitObj, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{}, subresources...)
+			submitObj, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{}, subresources...)
 			if err != nil {
 				return err
 			}
@@ -844,6 +904,7 @@ func testSubresourceUpdate(c *testContext) {
 		c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkUpdateOptions, v1beta1.Update, obj.GetName(), obj.GetNamespace(), true, true, true)
 
 		_, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Update(
+			context.TODO(),
 			submitObj,
 			metav1.UpdateOptions{},
 			subresources...,
@@ -871,6 +932,7 @@ func testSubresourcePatch(c *testContext) {
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkUpdateOptions, v1beta1.Update, obj.GetName(), obj.GetNamespace(), true, true, true)
 
 	_, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Patch(
+		context.TODO(),
 		obj.GetName(),
 		types.MergePatchType,
 		[]byte(`{"metadata":{"annotations":{"subresourcepatch":"true"}}}`),
@@ -905,7 +967,7 @@ func testNamespaceDelete(c *testContext) {
 	zero := int64(0)
 
 	c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), gvkDeleteOptions, v1beta1.Delete, obj.GetName(), obj.GetNamespace(), false, true, true)
-	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(obj.GetName(), &metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
+	err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Delete(context.TODO(), obj.GetName(), metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -913,7 +975,7 @@ func testNamespaceDelete(c *testContext) {
 	c.admissionHolder.verify(c.t)
 
 	// do the finalization so the namespace can be deleted
-	obj, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
+	obj, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -923,14 +985,14 @@ func testNamespaceDelete(c *testContext) {
 		c.t.Error(err)
 		return
 	}
-	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Update(obj, metav1.UpdateOptions{}, "finalize")
+	_, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Update(context.TODO(), obj, metav1.UpdateOptions{}, "finalize")
 	if err != nil {
 		c.t.Error(err)
 		return
 	}
 	// verify namespace is gone
-	obj, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(obj.GetName(), metav1.GetOptions{})
-	if err == nil || !errors.IsNotFound(err) {
+	obj, err = c.client.Resource(c.gvr).Namespace(obj.GetNamespace()).Get(context.TODO(), obj.GetName(), metav1.GetOptions{})
+	if err == nil || !apierrors.IsNotFound(err) {
 		c.t.Errorf("expected namespace to be gone, got %#v, %v", obj, err)
 	}
 }
@@ -979,7 +1041,7 @@ func testDeploymentRollback(c *testContext) {
 	rollbackUnstructuredObj := &unstructured.Unstructured{Object: rollbackUnstructuredBody}
 	rollbackUnstructuredObj.SetName(obj.GetName())
 
-	_, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Create(rollbackUnstructuredObj, metav1.CreateOptions{}, subresources...)
+	_, err = c.client.Resource(gvrWithoutSubresources).Namespace(obj.GetNamespace()).Create(context.TODO(), rollbackUnstructuredObj, metav1.CreateOptions{}, subresources...)
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -1003,11 +1065,11 @@ func testPodConnectSubresource(c *testContext) {
 		var err error
 		switch c.gvr {
 		case gvr("", "v1", "pods/exec"):
-			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("exec").Do().Error()
+			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("exec").Do(context.TODO()).Error()
 		case gvr("", "v1", "pods/attach"):
-			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("attach").Do().Error()
+			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("attach").Do(context.TODO()).Error()
 		case gvr("", "v1", "pods/portforward"):
-			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("portforward").Do().Error()
+			err = c.clientset.CoreV1().RESTClient().Verb(httpMethod).Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("portforward").Do(context.TODO()).Error()
 		default:
 			c.t.Errorf("unknown subresource %#v", c.gvr)
 			return
@@ -1032,10 +1094,10 @@ func testPodBindingEviction(c *testContext) {
 
 	background := metav1.DeletePropagationBackground
 	zero := int64(0)
-	forceDelete := &metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background}
+	forceDelete := metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background}
 	defer func() {
-		err := c.clientset.CoreV1().Pods(pod.GetNamespace()).Delete(pod.GetName(), forceDelete)
-		if err != nil && !errors.IsNotFound(err) {
+		err := c.clientset.CoreV1().Pods(pod.GetNamespace()).Delete(context.TODO(), pod.GetName(), forceDelete)
+		if err != nil && !apierrors.IsNotFound(err) {
 			c.t.Error(err)
 			return
 		}
@@ -1048,19 +1110,19 @@ func testPodBindingEviction(c *testContext) {
 		err = c.clientset.CoreV1().RESTClient().Post().Namespace(pod.GetNamespace()).Resource("bindings").Body(&corev1.Binding{
 			ObjectMeta: metav1.ObjectMeta{Name: pod.GetName()},
 			Target:     corev1.ObjectReference{Name: "foo", Kind: "Node", APIVersion: "v1"},
-		}).Do().Error()
+		}).Do(context.TODO()).Error()
 
 	case gvr("", "v1", "pods/binding"):
 		err = c.clientset.CoreV1().RESTClient().Post().Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("binding").Body(&corev1.Binding{
 			ObjectMeta: metav1.ObjectMeta{Name: pod.GetName()},
 			Target:     corev1.ObjectReference{Name: "foo", Kind: "Node", APIVersion: "v1"},
-		}).Do().Error()
+		}).Do(context.TODO()).Error()
 
 	case gvr("", "v1", "pods/eviction"):
 		err = c.clientset.CoreV1().RESTClient().Post().Namespace(pod.GetNamespace()).Resource("pods").Name(pod.GetName()).SubResource("eviction").Body(&policyv1beta1.Eviction{
 			ObjectMeta:    metav1.ObjectMeta{Name: pod.GetName()},
-			DeleteOptions: forceDelete,
-		}).Do().Error()
+			DeleteOptions: &forceDelete,
+		}).Do(context.TODO()).Error()
 
 	default:
 		c.t.Errorf("unhandled resource %#v", c.gvr)
@@ -1111,7 +1173,7 @@ func testSubresourceProxy(c *testContext) {
 		// set expectations
 		c.admissionHolder.expect(c.gvr, gvk(c.resource.Group, c.resource.Version, c.resource.Kind), schema.GroupVersionKind{}, v1beta1.Connect, obj.GetName(), obj.GetNamespace(), true, false, false)
 		// run the request. we don't actually care if the request is successful, just that admission gets called as expected
-		err = request.Resource(gvrWithoutSubresources.Resource).Name(obj.GetName()).SubResource(subresources...).Do().Error()
+		err = request.Resource(gvrWithoutSubresources.Resource).Name(obj.GetName()).SubResource(subresources...).Do(context.TODO()).Error()
 		if err != nil {
 			c.t.Logf("debug: result of subresource proxy (error expected): %v", err)
 		}
@@ -1123,7 +1185,7 @@ func testSubresourceProxy(c *testContext) {
 func testPruningRandomNumbers(c *testContext) {
 	testResourceCreate(c)
 
-	cr2pant, err := c.client.Resource(c.gvr).Get("fortytwo", metav1.GetOptions{})
+	cr2pant, err := c.client.Resource(c.gvr).Get(context.TODO(), "fortytwo", metav1.GetOptions{})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -1142,7 +1204,7 @@ func testPruningRandomNumbers(c *testContext) {
 func testNoPruningCustomFancy(c *testContext) {
 	testResourceCreate(c)
 
-	cr2pant, err := c.client.Resource(c.gvr).Get("cr2pant", metav1.GetOptions{})
+	cr2pant, err := c.client.Resource(c.gvr).Get(context.TODO(), "cr2pant", metav1.GetOptions{})
 	if err != nil {
 		c.t.Error(err)
 		return
@@ -1245,6 +1307,9 @@ func newV1beta1WebhookHandler(t *testing.T, holder *holder, phase string, conver
 		review.Kind = ""
 		review.Response.UID = ""
 
+		// test plumbing warnings back to the client
+		review.Response.Warnings = []string{makeWarning("v1beta1", phase, converted)}
+
 		// If we're mutating, and have an object, return a patch to exercise conversion
 		if phase == mutation && len(review.Request.Object.Raw) > 0 {
 			review.Response.Patch = []byte(`[{"op":"add","path":"/foo","value":"test"}]`)
@@ -1335,6 +1400,9 @@ func newV1WebhookHandler(t *testing.T, holder *holder, phase string, converted b
 			Allowed: true,
 			UID:     review.Request.UID,
 			Result:  &metav1.Status{Message: "admitted"},
+
+			// test plumbing warnings back
+			Warnings: []string{makeWarning("v1", phase, converted)},
 		}
 		// If we're mutating, and have an object, return a patch to exercise conversion
 		if phase == mutation && len(review.Request.Object.Raw) > 0 {
@@ -1397,14 +1465,14 @@ func createOrGetResource(client dynamic.Interface, gvr schema.GroupVersionResour
 	if resource.Namespaced {
 		ns = testNamespace
 	}
-	obj, err := client.Resource(gvr).Namespace(ns).Get(stubObj.GetName(), metav1.GetOptions{})
+	obj, err := client.Resource(gvr).Namespace(ns).Get(context.TODO(), stubObj.GetName(), metav1.GetOptions{})
 	if err == nil {
 		return obj, nil
 	}
-	if !errors.IsNotFound(err) {
+	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	return client.Resource(gvr).Namespace(ns).Create(stubObj, metav1.CreateOptions{})
+	return client.Resource(gvr).Namespace(ns).Create(context.TODO(), stubObj, metav1.CreateOptions{})
 }
 
 func gvr(group, version, resource string) schema.GroupVersionResource {
@@ -1421,17 +1489,11 @@ var (
 )
 
 func shouldTestResource(gvr schema.GroupVersionResource, resource metav1.APIResource) bool {
-	if !sets.NewString(resource.Verbs...).HasAny("create", "update", "patch", "connect", "delete", "deletecollection") {
-		return false
-	}
-	return true
+	return sets.NewString(resource.Verbs...).HasAny("create", "update", "patch", "connect", "delete", "deletecollection")
 }
 
 func shouldTestResourceVerb(gvr schema.GroupVersionResource, resource metav1.APIResource, verb string) bool {
-	if !sets.NewString(resource.Verbs...).Has(verb) {
-		return false
-	}
-	return true
+	return sets.NewString(resource.Verbs...).Has(verb)
 }
 
 //
@@ -1442,7 +1504,7 @@ func createV1beta1ValidationWebhook(client clientset.Interface, endpoint, conver
 	fail := admissionv1beta1.Fail
 	equivalent := admissionv1beta1.Equivalent
 	// Attaching Admission webhook to API server
-	_, err := client.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations().Create(&admissionv1beta1.ValidatingWebhookConfiguration{
+	_, err := client.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations().Create(context.TODO(), &admissionv1beta1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "admission.integration.test"},
 		Webhooks: []admissionv1beta1.ValidatingWebhook{
 			{
@@ -1470,7 +1532,7 @@ func createV1beta1ValidationWebhook(client clientset.Interface, endpoint, conver
 				AdmissionReviewVersions: []string{"v1beta1"},
 			},
 		},
-	})
+	}, metav1.CreateOptions{})
 	return err
 }
 
@@ -1478,7 +1540,7 @@ func createV1beta1MutationWebhook(client clientset.Interface, endpoint, converte
 	fail := admissionv1beta1.Fail
 	equivalent := admissionv1beta1.Equivalent
 	// Attaching Mutation webhook to API server
-	_, err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Create(&admissionv1beta1.MutatingWebhookConfiguration{
+	_, err := client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Create(context.TODO(), &admissionv1beta1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "mutation.integration.test"},
 		Webhooks: []admissionv1beta1.MutatingWebhook{
 			{
@@ -1506,7 +1568,7 @@ func createV1beta1MutationWebhook(client clientset.Interface, endpoint, converte
 				AdmissionReviewVersions: []string{"v1beta1"},
 			},
 		},
-	})
+	}, metav1.CreateOptions{})
 	return err
 }
 
@@ -1515,7 +1577,7 @@ func createV1ValidationWebhook(client clientset.Interface, endpoint, convertedEn
 	equivalent := admissionv1.Equivalent
 	none := admissionv1.SideEffectClassNone
 	// Attaching Admission webhook to API server
-	_, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Create(&admissionv1.ValidatingWebhookConfiguration{
+	_, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Create(context.TODO(), &admissionv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "admissionv1.integration.test"},
 		Webhooks: []admissionv1.ValidatingWebhook{
 			{
@@ -1545,7 +1607,7 @@ func createV1ValidationWebhook(client clientset.Interface, endpoint, convertedEn
 				SideEffects:             &none,
 			},
 		},
-	})
+	}, metav1.CreateOptions{})
 	return err
 }
 
@@ -1554,7 +1616,7 @@ func createV1MutationWebhook(client clientset.Interface, endpoint, convertedEndp
 	equivalent := admissionv1.Equivalent
 	none := admissionv1.SideEffectClassNone
 	// Attaching Mutation webhook to API server
-	_, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(&admissionv1.MutatingWebhookConfiguration{
+	_, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(context.TODO(), &admissionv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "mutationv1.integration.test"},
 		Webhooks: []admissionv1.MutatingWebhook{
 			{
@@ -1584,7 +1646,7 @@ func createV1MutationWebhook(client clientset.Interface, endpoint, convertedEndp
 				SideEffects:             &none,
 			},
 		},
-	})
+	}, metav1.CreateOptions{})
 	return err
 }
 

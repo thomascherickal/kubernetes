@@ -32,7 +32,7 @@ import (
 )
 
 var (
-	explainLong = templates.LongDesc(`
+	explainLong = templates.LongDesc(i18n.T(`
 		List the fields for supported resources
 
 		This command describes the fields associated with each supported API resource.
@@ -41,7 +41,7 @@ var (
 			<type>.<fieldName>[.<fieldName>]
 
 		Add the --recursive flag to display all of the fields at once without descriptions.
-		Information about each field is retrieved from the server in OpenAPI format.`)
+		Information about each field is retrieved from the server in OpenAPI format.`))
 
 	explainExamples = templates.Examples(i18n.T(`
 		# Get the documentation of the resource and its fields
@@ -86,7 +86,7 @@ func NewCmdExplain(parent string, f cmdutil.Factory, streams genericclioptions.I
 		},
 	}
 	cmd.Flags().BoolVar(&o.Recursive, "recursive", o.Recursive, "Print the fields of fields (Currently only 1 level deep)")
-	cmd.Flags().StringVar(&o.APIVersion, "api-version", o.APIVersion, "Get different explanations for particular API version")
+	cmd.Flags().StringVar(&o.APIVersion, "api-version", o.APIVersion, "Get different explanations for particular API version (API group/version)")
 	return cmd
 }
 
@@ -123,19 +123,14 @@ func (o *ExplainOptions) Run(args []string) error {
 	// TODO: After we figured out the new syntax to separate group and resource, allow
 	// the users to use it in explain (kubectl explain <group><syntax><resource>).
 	// Refer to issue #16039 for why we do this. Refer to PR #15808 that used "/" syntax.
-	inModel, fieldsPath, err := explain.SplitAndParseResourceRequest(args[0], o.Mapper)
+	fullySpecifiedGVR, fieldsPath, err := explain.SplitAndParseResourceRequest(args[0], o.Mapper)
 	if err != nil {
 		return err
 	}
 
-	// TODO: We should deduce the group for a resource by discovering the supported resources at server.
-	fullySpecifiedGVR, groupResource := schema.ParseResourceArg(inModel)
-	gvk := schema.GroupVersionKind{}
-	if fullySpecifiedGVR != nil {
-		gvk, _ = o.Mapper.KindFor(*fullySpecifiedGVR)
-	}
+	gvk, _ := o.Mapper.KindFor(fullySpecifiedGVR)
 	if gvk.Empty() {
-		gvk, err = o.Mapper.KindFor(groupResource.WithVersion(""))
+		gvk, err = o.Mapper.KindFor(fullySpecifiedGVR.GroupResource().WithVersion(""))
 		if err != nil {
 			return err
 		}
@@ -151,7 +146,7 @@ func (o *ExplainOptions) Run(args []string) error {
 
 	schema := o.Schema.LookupResource(gvk)
 	if schema == nil {
-		return fmt.Errorf("Couldn't find resource for %q", gvk)
+		return fmt.Errorf("couldn't find resource for %q", gvk)
 	}
 
 	return explain.PrintModelDescription(fieldsPath, o.Out, schema, gvk, recursive)

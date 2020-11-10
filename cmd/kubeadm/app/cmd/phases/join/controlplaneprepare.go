@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
@@ -78,7 +78,7 @@ func getControlPlanePreparePhaseFlags(name string) []string {
 			options.TLSBootstrapToken,
 			options.TokenStr,
 			options.CertificateKey,
-			options.Kustomize,
+			options.Patches,
 		}
 	case "download-certs":
 		flags = []string{
@@ -123,7 +123,7 @@ func getControlPlanePreparePhaseFlags(name string) []string {
 			options.APIServerBindPort,
 			options.CfgPath,
 			options.ControlPlane,
-			options.Kustomize,
+			options.Patches,
 		}
 	default:
 		flags = []string{}
@@ -189,7 +189,7 @@ func runControlPlanePrepareControlPlaneSubphase(c workflow.RunData) error {
 		fmt.Printf("[control-plane] Creating static Pod manifest for %q\n", component)
 		err := controlplane.CreateStaticPodFiles(
 			kubeadmconstants.GetStaticPodDirectory(),
-			data.KustomizeDir(),
+			data.PatchesDir(),
 			&cfg.ClusterConfiguration,
 			&cfg.LocalAPIEndpoint,
 			component,

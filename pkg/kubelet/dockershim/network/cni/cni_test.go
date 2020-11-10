@@ -1,4 +1,4 @@
-// +build linux
+// +build linux,!dockerless
 
 /*
 Copyright 2014 The Kubernetes Authors.
@@ -20,7 +20,6 @@ package cni
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -76,14 +75,18 @@ func installPluginUnderTest(t *testing.T, testBinDir, testConfDir, testDataDir, 
 	f, err = os.Create(pluginExec)
 	require.NoError(t, err)
 
+	// TODO: use mock instead of fake shell script plugin
 	const execScriptTempl = `#!/usr/bin/env bash
+echo -n "{ \"cniVersion\": \"{{.CNIVersion}}\", \"ip4\": { \"ip\": \"{{.PodIP}}/24\" } }"
+if [ "$CNI_COMMAND" = "VERSION" ]; then
+	exit
+fi
 cat > {{.InputFile}}
 env > {{.OutputEnv}}
 echo "%@" >> {{.OutputEnv}}
 export $(echo ${CNI_ARGS} | sed 's/;/ /g') &> /dev/null
 mkdir -p {{.OutputDir}} &> /dev/null
-echo -n "$CNI_COMMAND $CNI_NETNS $K8S_POD_NAMESPACE $K8S_POD_NAME $K8S_POD_INFRA_CONTAINER_ID" >& {{.OutputFile}}
-echo -n "{ \"cniVersion\": \"{{.CNIVersion}}\", \"ip4\": { \"ip\": \"{{.PodIP}}/24\" } }"`
+echo -n "$CNI_COMMAND $CNI_NETNS $K8S_POD_NAMESPACE $K8S_POD_NAME $K8S_POD_INFRA_CONTAINER_ID" >& {{.OutputFile}}`
 
 	inputFile := path.Join(testDataDir, binName+".in")
 	outputFile := path.Join(testDataDir, binName+".out")
@@ -173,9 +176,9 @@ func TestCNIPlugin(t *testing.T) {
 	fakeCmds := []fakeexec.FakeCommandAction{
 		func(cmd string, args ...string) exec.Cmd {
 			return fakeexec.InitFakeCmd(&fakeexec.FakeCmd{
-				CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
-					func() ([]byte, error) {
-						return []byte(podIPOutput), nil
+				CombinedOutputScript: []fakeexec.FakeAction{
+					func() ([]byte, []byte, error) {
+						return []byte(podIPOutput), nil, nil
 					},
 				},
 			}, cmd, args...)
@@ -225,7 +228,8 @@ func TestCNIPlugin(t *testing.T) {
 	cniPlugin.execer = fexec
 	cniPlugin.loNetwork.CNIConfig = mockLoCNI
 
-	mockLoCNI.On("AddNetworkList", context.TODO(), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(&types020.Result{IP4: &types020.IPConfig{IP: net.IPNet{IP: []byte{127, 0, 0, 1}}}}, nil)
+	mockLoCNI.On("AddNetworkList", mock.AnythingOfType("*context.timerCtx"), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(&types020.Result{IP4: &types020.IPConfig{IP: net.IPNet{IP: []byte{127, 0, 0, 1}}}}, nil)
+	mockLoCNI.On("DelNetworkList", mock.AnythingOfType("*context.timerCtx"), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(nil)
 
 	// Check that status returns an error
 	if err := cniPlugin.Status(); err == nil {
@@ -243,7 +247,6 @@ func TestCNIPlugin(t *testing.T) {
 	ports := map[string][]*hostport.PortMapping{
 		containerID.ID: {
 			{
-				Name:          "name",
 				HostPort:      8008,
 				ContainerPort: 80,
 				Protocol:      "UDP",

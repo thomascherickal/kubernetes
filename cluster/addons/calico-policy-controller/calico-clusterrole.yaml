@@ -4,7 +4,6 @@ metadata:
   name: calico
   namespace: kube-system
   labels:
-    kubernetes.io/cluster-service: "true"
     addonmanager.kubernetes.io/mode: Reconcile
 rules:
   # The CNI plugin needs to get pods, nodes, and namespaces.
@@ -13,6 +12,12 @@ rules:
       - pods
       - nodes
       - namespaces
+    verbs:
+      - get
+  # calico/node checks configmaps for cluster CIDR.
+  - apiGroups: [""]
+    resources:
+      - configmaps
     verbs:
       - get
   - apiGroups: [""]
@@ -56,7 +61,7 @@ rules:
     verbs:
       - patch
   # Calico monitors various CRDs for config.
-  # Note: Though we are not using ipam from calico, calico node still needs those permission
+  # Note: Though we are not using ipam from calico, calico node still needs those permissions
   #       to boot.
   - apiGroups: ["crd.projectcalico.org"]
     resources:

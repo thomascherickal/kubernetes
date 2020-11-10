@@ -26,8 +26,7 @@ you need these features, please consider building the images from either the
 "basic" or "platinum" version. After enabling these features, follow [official
 documentation][setupCreds] to set up credentials in Elasticsearch and Kibana.
 Don't forget to propagate those credentials also to Fluentd in its
-[configuration][fluentdCreds], using for example [environment
-variables][fluentdEnvVar]. You can utilize [ConfigMaps][configMap] and
+[configuration][fluentdCreds]. You can utilize [ConfigMaps][configMap] and
 [Secrets][secret] to store credentials in the Kubernetes apiserver.
 
 ### Initialization
@@ -72,7 +71,6 @@ avoid Fluentd pods scheduling there.
 [xPack]: https://www.elastic.co/products/x-pack
 [setupCreds]: https://www.elastic.co/guide/en/x-pack/current/setting-up-authentication.html#reset-built-in-user-passwords
 [fluentdCreds]: https://github.com/uken/fluent-plugin-elasticsearch#user-password-path-scheme-ssl_verify
-[fluentdEnvVar]: https://docs.fluentd.org/v0.12/articles/faq#how-can-i-use-environment-variables-to-configure-parameters-dynamically
 [configMap]: https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
 [secret]: https://kubernetes.io/docs/concepts/configuration/secret/
 [statefulSet]: https://kubernetes.io/docs/concepts/workloads/controllers/statefulset
@@ -80,8 +78,6 @@ avoid Fluentd pods scheduling there.
 [emptyDir]: https://kubernetes.io/docs/concepts/storage/volumes#emptydir
 [daemonSet]: https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/
 [k8sElasticsearchDocs]: https://kubernetes.io/docs/tasks/debug-application-cluster/logging-elasticsearch-kibana
-
-[![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/cluster/addons/fluentd-elasticsearch/README.md?pixel)]()
 
 ## Running EFK stack in production
 
@@ -91,10 +87,4 @@ are a starting point and should not be considered to be production ready.
 If you like to run these tools in a production environment you could use the
 [Helm](https://helm.sh) charts, provided by the Helm community, which are used
 by a lot of people and therefore are widely tested. You can find them all via the
-[Helm Hub](https://hub.helm.sh/).
-
-The source of the mentioned charts can be found here:
-
-* [Elasticsearch](https://github.com/helm/charts/tree/master/stable/elasticsearch)
-* [Fluentd-elasticsearch](https://github.com/kiwigrid/helm-charts/tree/master/charts/fluentd-elasticsearch)
-* [Kibana](https://github.com/helm/charts/tree/master/stable/kibana)
+[Helm Hub](https://hub.helm.sh/) or the [Artifact hub](https://artifacthub.io/).

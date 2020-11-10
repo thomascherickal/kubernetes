@@ -17,20 +17,24 @@ limitations under the License.
 package spdy
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/docker/spdystream"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 )
 
-func runProxy(t *testing.T, backendUrl string, proxyUrl chan<- string, proxyDone chan<- struct{}) {
+func runProxy(t *testing.T, backendUrl string, proxyUrl chan<- string, proxyDone chan<- struct{}, errCh chan<- error) {
 	listener, err := net.Listen("tcp4", "localhost:0")
 	if err != nil {
-		t.Fatalf("error listening: %v", err)
+		errCh <- err
+		return
 	}
 	defer listener.Close()
 
@@ -67,10 +71,11 @@ func runProxy(t *testing.T, backendUrl string, proxyUrl chan<- string, proxyDone
 	proxyDone <- struct{}{}
 }
 
-func runServer(t *testing.T, backendUrl chan<- string, serverDone chan<- struct{}) {
+func runServer(t *testing.T, backendUrl chan<- string, serverDone chan<- struct{}, errCh chan<- error) {
 	listener, err := net.Listen("tcp4", "localhost:0")
 	if err != nil {
-		t.Fatalf("server: error listening: %v", err)
+		errCh <- err
+		return
 	}
 	defer listener.Close()
 
@@ -115,15 +120,29 @@ func runServer(t *testing.T, backendUrl chan<- string, serverDone chan<- struct{
 }
 
 func TestConnectionCloseIsImmediateThroughAProxy(t *testing.T) {
-	serverDone := make(chan struct{})
-	backendUrlChan := make(chan string)
-	go runServer(t, backendUrlChan, serverDone)
-	backendUrl := <-backendUrlChan
+	errCh := make(chan error)
 
-	proxyDone := make(chan struct{})
+	serverDone := make(chan struct{}, 1)
+	backendUrlChan := make(chan string)
+	go runServer(t, backendUrlChan, serverDone, errCh)
+
+	var backendUrl string
+	select {
+	case err := <-errCh:
+		t.Fatalf("server: error listening: %v", err)
+	case backendUrl = <-backendUrlChan:
+	}
+
+	proxyDone := make(chan struct{}, 1)
 	proxyUrlChan := make(chan string)
-	go runProxy(t, backendUrl, proxyUrlChan, proxyDone)
-	proxyUrl := <-proxyUrlChan
+	go runProxy(t, backendUrl, proxyUrlChan, proxyDone, errCh)
+
+	var proxyUrl string
+	select {
+	case err := <-errCh:
+		t.Fatalf("error listening: %v", err)
+	case proxyUrl = <-proxyUrlChan:
+	}
 
 	conn, err := net.Dial("tcp4", proxyUrl)
 	if err != nil {
@@ -160,5 +179,114 @@ func TestConnectionCloseIsImmediateThroughAProxy(t *testing.T) {
 		if i == 2 {
 			break
 		}
+	}
+}
+
+func TestConnectionPings(t *testing.T) {
+	const pingPeriod = 10 * time.Millisecond
+	timeout := time.After(10 * time.Second)
+
+	// Set up server connection.
+	listener, err := net.Listen("tcp4", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		defer close(srvErr)
+
+		srvConn, err := listener.Accept()
+		if err != nil {
+			srvErr <- fmt.Errorf("server: error accepting connection: %v", err)
+			return
+		}
+		defer srvConn.Close()
+
+		spdyConn, err := spdystream.NewConnection(srvConn, true)
+		if err != nil {
+			srvErr <- fmt.Errorf("server: error creating spdy connection: %v", err)
+			return
+		}
+
+		var pingsSent int64
+		srvSPDYConn := newConnection(
+			spdyConn,
+			func(stream httpstream.Stream, replySent <-chan struct{}) error {
+				// Echo all the incoming data.
+				go io.Copy(stream, stream)
+				return nil
+			},
+			pingPeriod,
+			func() (time.Duration, error) {
+				atomic.AddInt64(&pingsSent, 1)
+				return 0, nil
+			})
+		defer srvSPDYConn.Close()
+
+		// Wait for the connection to close, to prevent defers from running
+		// early.
+		select {
+		case <-timeout:
+			srvErr <- fmt.Errorf("server: timeout waiting for connection to close")
+			return
+		case <-srvSPDYConn.CloseChan():
+		}
+
+		// Count pings sent by the server.
+		gotPings := atomic.LoadInt64(&pingsSent)
+		if gotPings < 1 {
+			t.Errorf("server: failed to send any pings (check logs)")
+		}
+	}()
+
+	// Set up client connection.
+	clConn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("client: error connecting to proxy: %v", err)
+	}
+	defer clConn.Close()
+	start := time.Now()
+	clSPDYConn, err := NewClientConnection(clConn)
+	if err != nil {
+		t.Fatalf("client: error creating spdy connection: %v", err)
+	}
+	defer clSPDYConn.Close()
+	clSPDYStream, err := clSPDYConn.CreateStream(http.Header{})
+	if err != nil {
+		t.Fatalf("client: error creating stream: %v", err)
+	}
+	defer clSPDYStream.Close()
+
+	// Send some data both ways, to make sure pings don't interfere with
+	// regular messages.
+	in := "foo"
+	if _, err := fmt.Fprintln(clSPDYStream, in); err != nil {
+		t.Fatalf("client: error writing data to stream: %v", err)
+	}
+	var out string
+	if _, err := fmt.Fscanln(clSPDYStream, &out); err != nil {
+		t.Fatalf("client: error reading data from stream: %v", err)
+	}
+	if in != out {
+		t.Errorf("client: received data doesn't match sent data: got %q, want %q", out, in)
+	}
+
+	// Wait for at least 2 pings to get sent each way before closing the
+	// connection.
+	elapsed := time.Since(start)
+	if elapsed < 3*pingPeriod {
+		time.Sleep(3*pingPeriod - elapsed)
+	}
+	clSPDYConn.Close()
+
+	select {
+	case err, ok := <-srvErr:
+		if ok && err != nil {
+			t.Error(err)
+		}
+	case <-timeout:
+		t.Errorf("timed out waiting for server to exit")
 	}
 }

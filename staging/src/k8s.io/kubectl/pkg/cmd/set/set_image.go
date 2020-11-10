@@ -20,9 +20,9 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -44,13 +44,15 @@ type SetImageOptions struct {
 	PrintFlags  *genericclioptions.PrintFlags
 	RecordFlags *genericclioptions.RecordFlags
 
-	Infos        []*resource.Info
-	Selector     string
-	DryRun       bool
-	All          bool
-	Output       string
-	Local        bool
-	ResolveImage ImageResolver
+	Infos          []*resource.Info
+	Selector       string
+	DryRunStrategy cmdutil.DryRunStrategy
+	DryRunVerifier *resource.DryRunVerifier
+	All            bool
+	Output         string
+	Local          bool
+	ResolveImage   ImageResolver
+	fieldManager   string
 
 	PrintObj printers.ResourcePrinterFunc
 	Recorder genericclioptions.Recorder
@@ -63,14 +65,14 @@ type SetImageOptions struct {
 }
 
 var (
-	imageResources = `
-  	pod (po), replicationcontroller (rc), deployment (deploy), daemonset (ds), replicaset (rs)`
+	imageResources = i18n.T(`
+  	pod (po), replicationcontroller (rc), deployment (deploy), daemonset (ds), replicaset (rs)`)
 
-	imageLong = templates.LongDesc(`
+	imageLong = templates.LongDesc(i18n.T(`
 		Update existing container image(s) of resources.
 
 		Possible resources include (case insensitive):
-		` + imageResources)
+		`) + imageResources)
 
 	imageExample = templates.Examples(`
 		# Set a deployment's nginx container image to 'nginx:1.9.1', and its busybox container image to 'busybox'.
@@ -124,7 +126,7 @@ func NewCmdImage(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 	cmd.Flags().StringVarP(&o.Selector, "selector", "l", o.Selector, "Selector (label query) to filter on, not including uninitialized ones, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	cmd.Flags().BoolVar(&o.Local, "local", o.Local, "If true, set image will NOT contact api-server but run locally.")
 	cmdutil.AddDryRunFlag(cmd)
-	cmdutil.AddIncludeUninitializedFlag(cmd)
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-set")
 	return cmd
 }
 
@@ -139,13 +141,23 @@ func (o *SetImageOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 	}
 
 	o.UpdatePodSpecForObject = polymorphichelpers.UpdatePodSpecForObjectFn
-	o.DryRun = cmdutil.GetDryRunFlag(cmd)
+	o.DryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := f.DynamicClient()
+	if err != nil {
+		return err
+	}
+	discoveryClient, err := f.ToDiscoveryClient()
+	if err != nil {
+		return err
+	}
+	o.DryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
 	o.Output = cmdutil.GetFlagString(cmd, "output")
 	o.ResolveImage = resolveImageFunc
 
-	if o.DryRun {
-		o.PrintFlags.Complete("%s (dry run)")
-	}
+	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 	printer, err := o.PrintFlags.ToPrinter()
 	if err != nil {
 		return err
@@ -206,6 +218,9 @@ func (o *SetImageOptions) Validate() error {
 	} else if len(o.ContainerImages) > 1 && hasWildcardKey(o.ContainerImages) {
 		errors = append(errors, fmt.Errorf("all containers are already specified by *, but saw more than one container_name=container_image pairs"))
 	}
+	if o.Local && o.DryRunStrategy == cmdutil.DryRunServer {
+		errors = append(errors, fmt.Errorf("cannot specify --local and --dry-run=server - did you mean --dry-run=client?"))
+	}
 	return utilerrors.NewAggregate(errors)
 }
 
@@ -257,15 +272,24 @@ func (o *SetImageOptions) Run() error {
 			continue
 		}
 
-		if o.Local || o.DryRun {
+		if o.Local || o.DryRunStrategy == cmdutil.DryRunClient {
 			if err := o.PrintObj(info.Object, o.Out); err != nil {
 				allErrs = append(allErrs, err)
 			}
 			continue
 		}
 
+		if o.DryRunStrategy == cmdutil.DryRunServer {
+			if err := o.DryRunVerifier.HasSupport(info.Mapping.GroupVersionKind); err != nil {
+				return err
+			}
+		}
 		// patch the change
-		actual, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
+		actual, err := resource.
+			NewHelper(info.Client, info.Mapping).
+			DryRun(o.DryRunStrategy == cmdutil.DryRunServer).
+			WithFieldManager(o.fieldManager).
+			Patch(info.Namespace, info.Name, types.StrategicMergePatchType, patch.Patch, nil)
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("failed to patch image update to pod template: %v", err))
 			continue

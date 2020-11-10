@@ -16,10 +16,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -40,11 +41,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
-	kubeletstatsv1alpha1 "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
+	kubeletstatsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/pkg/util/procfs"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/e2e_node/perftype"
 
@@ -65,6 +65,8 @@ var (
 	systemContainers map[string]string
 )
 
+// ResourceCollector is a collector object which collects
+// resource usage periodically from Cadvisor.
 type ResourceCollector struct {
 	client  *cadvisorclient.Client
 	request *cadvisorapiv2.RequestOptions
@@ -97,7 +99,7 @@ func (r *ResourceCollector) Start() {
 			kubeletstatsv1alpha1.SystemContainerRuntime: runtimeContainer,
 		}
 	} else {
-		e2elog.Failf("Failed to get runtime container name in test-e2e-node resource collector.")
+		framework.Failf("Failed to get runtime container name in test-e2e-node resource collector.")
 	}
 
 	wait.Poll(1*time.Second, 1*time.Minute, func() (bool, error) {
@@ -146,9 +148,9 @@ func (r *ResourceCollector) GetCPUSummary() e2ekubelet.ContainersCPUSummary {
 func (r *ResourceCollector) LogLatest() {
 	summary, err := r.GetLatest()
 	if err != nil {
-		e2elog.Logf("%v", err)
+		framework.Logf("%v", err)
 	}
-	e2elog.Logf("%s", formatResourceUsageStats(summary))
+	framework.Logf("%s", formatResourceUsageStats(summary))
 }
 
 // collectStats collects resource usage from Cadvisor.
@@ -156,12 +158,12 @@ func (r *ResourceCollector) collectStats(oldStatsMap map[string]*cadvisorapiv2.C
 	for _, name := range systemContainers {
 		ret, err := r.client.Stats(name, r.request)
 		if err != nil {
-			e2elog.Logf("Error getting container stats, err: %v", err)
+			framework.Logf("Error getting container stats, err: %v", err)
 			return
 		}
 		cStats, ok := ret[name]
 		if !ok {
-			e2elog.Logf("Missing info/stats for container %q", name)
+			framework.Logf("Missing info/stats for container %q", name)
 			return
 		}
 
@@ -374,7 +376,7 @@ func deletePodsSync(f *framework.Framework, pods []*v1.Pod) {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
 
-			err := f.PodClient().Delete(pod.ObjectMeta.Name, metav1.NewDeleteOptions(30))
+			err := f.PodClient().Delete(context.TODO(), pod.ObjectMeta.Name, *metav1.NewDeleteOptions(30))
 			framework.ExpectNoError(err)
 
 			gomega.Expect(e2epod.WaitForPodToDisappear(f.ClientSet, f.Namespace.Name, pod.ObjectMeta.Name, labels.Everything(),
@@ -440,7 +442,7 @@ func newTestPods(numPods int, volume bool, imageName, podType string) []*v1.Pod 
 	return pods
 }
 
-// GetResourceSeriesWithLabels gets the time series of resource usage of each container.
+// GetResourceTimeSeries gets the time series of resource usage of each container.
 func (r *ResourceCollector) GetResourceTimeSeries() map[string]*perftype.ResourceSeries {
 	resourceSeries := make(map[string]*perftype.ResourceSeries)
 	for key, name := range systemContainers {
@@ -462,12 +464,12 @@ const kubeletProcessName = "kubelet"
 
 func getPidsForProcess(name, pidFile string) ([]int, error) {
 	if len(pidFile) > 0 {
-		if pid, err := getPidFromPidFile(pidFile); err == nil {
+		pid, err := getPidFromPidFile(pidFile)
+		if err == nil {
 			return []int{pid}, nil
-		} else {
-			// log the error and fall back to pidof
-			runtime.HandleError(err)
 		}
+		// log the error and fall back to pidof
+		runtime.HandleError(err)
 	}
 	return procfs.PidOf(name)
 }
@@ -514,6 +516,14 @@ func getContainer(pid int) (string, error) {
 	cgs, err := cgroups.ParseCgroupFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		return "", err
+	}
+
+	if cgroups.IsCgroup2UnifiedMode() {
+		unified, found := cgs[""]
+		if !found {
+			return "", cgroups.NewNotFoundError("unified")
+		}
+		return unified, nil
 	}
 
 	cpu, found := cgs["cpu"]

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	componentbaseconfig "k8s.io/component-base/config"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
+
 	"k8s.io/utils/pointer"
 )
 
@@ -86,6 +87,85 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			HealthzBindAddress: "",
 			MetricsBindAddress: "127.0.0.1:10249",
 			ClusterCIDR:        "192.168.59.0/24",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+		},
+		{
+			BindAddress:        "fd00:192:168:59::103",
+			HealthzBindAddress: "",
+			MetricsBindAddress: "[::1]:10249",
+			ClusterCIDR:        "fd00:192:168:59::/64",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+		},
+		{
+			BindAddress:        "10.10.12.11",
+			HealthzBindAddress: "0.0.0.0:12345",
+			MetricsBindAddress: "127.0.0.1:10249",
+			FeatureGates:       map[string]bool{"IPv6DualStack": true, "EndpointSlice": true},
+			ClusterCIDR:        "192.168.59.0/24",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+		},
+		{
+			BindAddress:        "10.10.12.11",
+			HealthzBindAddress: "0.0.0.0:12345",
+			MetricsBindAddress: "127.0.0.1:10249",
+			FeatureGates:       map[string]bool{"IPv6DualStack": true},
+			ClusterCIDR:        "fd00:192:168::/64",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+		},
+		{
+			BindAddress:        "10.10.12.11",
+			HealthzBindAddress: "0.0.0.0:12345",
+			MetricsBindAddress: "127.0.0.1:10249",
+			FeatureGates:       map[string]bool{"IPv6DualStack": true},
+			ClusterCIDR:        "192.168.59.0/24,fd00:192:168::/64",
 			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
 			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
 			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
@@ -202,7 +282,127 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
 				},
 			},
-			msg: "must be a valid CIDR block (e.g. 10.100.0.0/16 or FD02::0:0:0/96)",
+			msg: "must be a valid CIDR block (e.g. 10.100.0.0/16 or fde4:8dba:82e1::/48)",
+		},
+		{
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				// DualStack ClusterCIDR without feature flag enabled
+				FeatureGates:     map[string]bool{"IPv6DualStack": false, "EndpointSlice": false},
+				ClusterCIDR:      "192.168.59.0/24,fd00:192:168::/64",
+				UDPIdleTimeout:   metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod: metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+			},
+			msg: "only one CIDR allowed (e.g. 10.100.0.0/16 or fde4:8dba:82e1::/48)",
+		},
+		{
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				// DualStack ClusterCIDR with feature flag enabled but EndpointSlice is not enabled
+				FeatureGates:     map[string]bool{"IPv6DualStack": true, "EndpointSlice": false},
+				ClusterCIDR:      "192.168.59.0/24,fd00:192:168::/64",
+				UDPIdleTimeout:   metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod: metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+			},
+			msg: "EndpointSlice feature flag must be turned on",
+		},
+
+		{
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				// DualStack with multiple CIDRs but only one IP family
+				FeatureGates:     map[string]bool{"IPv6DualStack": true, "EndpointSlice": true},
+				ClusterCIDR:      "192.168.59.0/24,10.0.0.0/16",
+				UDPIdleTimeout:   metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod: metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+			},
+			msg: "must be a valid DualStack CIDR (e.g. 10.100.0.0/16,fde4:8dba:82e1::/48)",
+		},
+		{
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				// DualStack with an invalid subnet
+				FeatureGates:     map[string]bool{"IPv6DualStack": true, "EndpointSlice": true},
+				ClusterCIDR:      "192.168.59.0/24,fd00:192:168::/64,a.b.c.d/f",
+				UDPIdleTimeout:   metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod: metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+			},
+			msg: "only one CIDR allowed or a valid DualStack CIDR (e.g. 10.100.0.0/16,fde4:8dba:82e1::/48)",
+		},
+		{
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				FeatureGates:       map[string]bool{"IPv6DualStack": true, "EndpointSlice": true},
+				ClusterCIDR:        "192.168.59.0/24,fd00:192:168::/64,10.0.0.0/16",
+				UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+			},
+			msg: "only one CIDR allowed or a valid DualStack CIDR (e.g. 10.100.0.0/16,fde4:8dba:82e1::/48)",
 		},
 		{
 			config: kubeproxyconfig.KubeProxyConfiguration{
@@ -421,6 +621,53 @@ func TestValidateKubeProxyIPVSConfiguration(t *testing.T) {
 				MinSyncPeriod: metav1.Duration{Duration: 0 * time.Second},
 			},
 			expectErr: false,
+		},
+		// IPVS Timeout can be 0
+		{
+			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				TCPTimeout:    metav1.Duration{Duration: 0 * time.Second},
+				TCPFinTimeout: metav1.Duration{Duration: 0 * time.Second},
+				UDPTimeout:    metav1.Duration{Duration: 0 * time.Second},
+			},
+			expectErr: false,
+		},
+		// IPVS Timeout > 0
+		{
+			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				TCPTimeout:    metav1.Duration{Duration: 1 * time.Second},
+				TCPFinTimeout: metav1.Duration{Duration: 2 * time.Second},
+				UDPTimeout:    metav1.Duration{Duration: 3 * time.Second},
+			},
+			expectErr: false,
+		},
+		// TCPTimeout Timeout < 0
+		{
+			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
+				SyncPeriod: metav1.Duration{Duration: 5 * time.Second},
+				TCPTimeout: metav1.Duration{Duration: -1 * time.Second},
+			},
+			expectErr: true,
+			reason:    "TCPTimeout must be greater than or equal to 0",
+		},
+		// TCPFinTimeout Timeout < 0
+		{
+			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				TCPFinTimeout: metav1.Duration{Duration: -1 * time.Second},
+			},
+			expectErr: true,
+			reason:    "TCPFinTimeout must be greater than or equal to 0",
+		},
+		// UDPTimeout Timeout < 0
+		{
+			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
+				SyncPeriod: metav1.Duration{Duration: 5 * time.Second},
+				UDPTimeout: metav1.Duration{Duration: -1 * time.Second},
+			},
+			expectErr: true,
+			reason:    "UDPTimeout must be greater than or equal to 0",
 		},
 	}
 
@@ -702,52 +949,51 @@ func TestValidateKubeProxyNodePortAddress(t *testing.T) {
 		}
 	}
 
-	errorCases := []struct {
-		addresses []string
-		msg       string
+	testCases := map[string]struct {
+		addresses    []string
+		expectedErrs field.ErrorList
 	}{
-		{
-			addresses: []string{"foo"},
-			msg:       "must be a valid IP block",
+		"invalid foo address": {
+			addresses:    []string{"foo"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[0]"), "foo", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"1.2.3"},
-			msg:       "must be a valid IP block",
+		"invalid octet address": {
+			addresses:    []string{"10.0.0.0/0", "1.2.3"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[1]"), "1.2.3", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{""},
-			msg:       "must be a valid IP block",
+		"address cannot be 0": {
+			addresses:    []string{"127.0.0.1/32", "0", "1.2.3.0/24"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[1]"), "0", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"10.20.30.40"},
-			msg:       "must be a valid IP block",
+		"address missing subnet range": {
+			addresses:    []string{"127.0.0.1/32", "10.20.30.40", "1.2.3.0/24"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[1]"), "10.20.30.40", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"::1"},
-			msg:       "must be a valid IP block",
+		"missing ipv6 subnet ranges": {
+			addresses: []string{"::0", "::1", "2001:db8::/32"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[0]"), "::0", "must be a valid CIDR"),
+				field.Invalid(newPath.Child("NodePortAddresses[1]"), "::1", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"2001:db8:1"},
-			msg:       "must be a valid IP block",
-		},
-		{
-			addresses: []string{"2001:db8:xyz/64"},
-			msg:       "must be a valid IP block",
+		"invalid ipv6 ip format": {
+			addresses:    []string{"::1/128", "2001:db8::/32", "2001:db8:xyz/64"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("NodePortAddresses[2]"), "2001:db8:xyz/64", "must be a valid CIDR")},
 		},
 	}
 
-	for _, errorCase := range errorCases {
-		if errs := validateKubeProxyNodePortAddress(errorCase.addresses, newPath.Child("NodePortAddresses")); len(errs) == 0 {
-			t.Errorf("expected failure for %s", errorCase.msg)
-		} else if !strings.Contains(errs[0].Error(), errorCase.msg) {
-			t.Errorf("unexpected error: %v, expected: %s", errs[0], errorCase.msg)
+	for _, testCase := range testCases {
+		errs := validateKubeProxyNodePortAddress(testCase.addresses, newPath.Child("NodePortAddresses"))
+		if len(testCase.expectedErrs) != len(errs) {
+			t.Errorf("Expected %d errors, got %d errors: %v", len(testCase.expectedErrs), len(errs), errs)
+		}
+		for i, err := range errs {
+			if err.Error() != testCase.expectedErrs[i].Error() {
+				t.Errorf("Expected error: %s, got %s", testCase.expectedErrs[i], err.Error())
+			}
 		}
 	}
 }
 
 func TestValidateKubeProxyExcludeCIDRs(t *testing.T) {
-	// TODO(rramkumar): This test is a copy of TestValidateKubeProxyNodePortAddress.
-	// Maybe some code can be shared?
 	newPath := field.NewPath("KubeProxyConfiguration")
 
 	successCases := []struct {
@@ -774,45 +1020,46 @@ func TestValidateKubeProxyExcludeCIDRs(t *testing.T) {
 		}
 	}
 
-	errorCases := []struct {
-		addresses []string
-		msg       string
+	testCases := map[string]struct {
+		addresses    []string
+		expectedErrs field.ErrorList
 	}{
-		{
-			addresses: []string{"foo"},
-			msg:       "must be a valid IP block",
+		"invalid foo address": {
+			addresses:    []string{"foo"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[0]"), "foo", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"1.2.3"},
-			msg:       "must be a valid IP block",
+		"invalid octet address": {
+			addresses:    []string{"10.0.0.0/0", "1.2.3"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[1]"), "1.2.3", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{""},
-			msg:       "must be a valid IP block",
+		"address cannot be 0": {
+			addresses:    []string{"127.0.0.1/32", "0", "1.2.3.0/24"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[1]"), "0", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"10.20.30.40"},
-			msg:       "must be a valid IP block",
+		"address missing subnet range": {
+			addresses:    []string{"127.0.0.1/32", "10.20.30.40", "1.2.3.0/24"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[1]"), "10.20.30.40", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"::1"},
-			msg:       "must be a valid IP block",
+		"missing ipv6 subnet ranges": {
+			addresses: []string{"::0", "::1", "2001:db8::/32"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[0]"), "::0", "must be a valid CIDR"),
+				field.Invalid(newPath.Child("ExcludeCIDRS[1]"), "::1", "must be a valid CIDR")},
 		},
-		{
-			addresses: []string{"2001:db8:1"},
-			msg:       "must be a valid IP block",
-		},
-		{
-			addresses: []string{"2001:db8:xyz/64"},
-			msg:       "must be a valid IP block",
+		"invalid ipv6 ip format": {
+			addresses:    []string{"::1/128", "2001:db8::/32", "2001:db8:xyz/64"},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ExcludeCIDRS[2]"), "2001:db8:xyz/64", "must be a valid CIDR")},
 		},
 	}
 
-	for _, errorCase := range errorCases {
-		if errs := validateIPVSExcludeCIDRs(errorCase.addresses, newPath.Child("ExcludeCIDRs")); len(errs) == 0 {
-			t.Errorf("expected failure for %s", errorCase.msg)
-		} else if !strings.Contains(errs[0].Error(), errorCase.msg) {
-			t.Errorf("unexpected error: %v, expected: %s", errs[0], errorCase.msg)
+	for _, testCase := range testCases {
+		errs := validateIPVSExcludeCIDRs(testCase.addresses, newPath.Child("ExcludeCIDRS"))
+		if len(testCase.expectedErrs) != len(errs) {
+			t.Errorf("Expected %d errors, got %d errors: %v", len(testCase.expectedErrs), len(errs), errs)
+		}
+		for i, err := range errs {
+			if err.Error() != testCase.expectedErrs[i].Error() {
+				t.Errorf("Expected error: %s, got %s", testCase.expectedErrs[i], err.Error())
+			}
 		}
 	}
 }

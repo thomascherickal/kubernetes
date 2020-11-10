@@ -113,7 +113,7 @@ kubectl get deployments -l app=nginx
 By default Get and Describe will fetch resource in the default namespace or the namespace specified
 with `--namespace`.
 
-The `---all-namespaces` flag will **fetch Resources from all namespaces**.
+The `--all-namespaces` flag will **fetch Resources from all namespaces**.
 
 {% sample lang="yaml" %}
 
@@ -146,21 +146,7 @@ Get and Describe can accept **multiple Resource types and names**.
 {% sample lang="yaml" %}
 
 ```bash
-kubectl get kubectl get rc/web service/frontend pods/web-pod-13je7
-```
-
-{% endmethod %}
-  
-{% method %}
-## Uninitialized
-
-Kubernetes **Resources may be hidden until they have gone through an initialization process**.
-These Resources can be view with the `--include-uninitialized` flag.
-
-{% sample lang="yaml" %}
-
-```bash
-kubectl get deployments --include-uninitialized
+kubectl get rc/web service/frontend pods/web-pod-13je7
 ```
 
 {% endmethod %}

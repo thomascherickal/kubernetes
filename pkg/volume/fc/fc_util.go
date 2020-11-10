@@ -21,14 +21,13 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
-	"k8s.io/api/core/v1"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
+
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 )
@@ -62,12 +61,13 @@ func (handler *osIOHandler) WriteFile(filename string, data []byte, perm os.File
 
 // given a wwn and lun, find the device and associated devicemapper parent
 func findDisk(wwn, lun string, io ioHandler, deviceUtil volumeutil.DeviceUtil) (string, string) {
-	fcPath := "-fc-0x" + wwn + "-lun-" + lun
+	fcPathExp := "^(pci-.*-fc|fc)-0x" + wwn + "-lun-" + lun
+	r := regexp.MustCompile(fcPathExp)
 	devPath := byPath
 	if dirs, err := io.ReadDir(devPath); err == nil {
 		for _, f := range dirs {
 			name := f.Name()
-			if strings.Contains(name, fcPath) {
+			if r.MatchString(name) {
 				if disk, err1 := io.EvalSymlinks(devPath + name); err1 == nil {
 					dm := deviceUtil.FindMultipathDeviceForDevice(disk)
 					klog.Infof("fc: find disk: %v, dm: %v", disk, dm)
@@ -242,37 +242,8 @@ func (util *fcUtil) AttachDisk(b fcDiskMounter) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// TODO: remove feature gate check after no longer needed
-	if utilfeature.DefaultFeatureGate.Enabled(features.BlockVolume) {
-		// If the volumeMode is 'Block', plugin don't have to format the volume.
-		// The globalPDPath will be created by operationexecutor. Just return devicePath here.
-		klog.V(5).Infof("fc: AttachDisk volumeMode: %s, devicePath: %s", b.volumeMode, devicePath)
-		if b.volumeMode == v1.PersistentVolumeBlock {
-			return devicePath, nil
-		}
-	}
 
-	// mount it
-	globalPDPath := util.MakeGlobalPDName(*b.fcDisk)
-	if err := os.MkdirAll(globalPDPath, 0750); err != nil {
-		return devicePath, fmt.Errorf("fc: failed to mkdir %s, error", globalPDPath)
-	}
-
-	noMnt, err := b.mounter.IsLikelyNotMountPoint(globalPDPath)
-	if err != nil {
-		return devicePath, fmt.Errorf("Heuristic determination of mount point failed:%v", err)
-	}
-	if !noMnt {
-		klog.Infof("fc: %s already mounted", globalPDPath)
-		return devicePath, nil
-	}
-
-	err = b.mounter.FormatAndMount(devicePath, globalPDPath, b.fsType, nil)
-	if err != nil {
-		return devicePath, fmt.Errorf("fc: failed to mount fc volume %s [%s] to %s, error %v", devicePath, b.fsType, globalPDPath, err)
-	}
-
-	return devicePath, err
+	return devicePath, nil
 }
 
 // DetachDisk removes scsi device file such as /dev/sdX from the node.

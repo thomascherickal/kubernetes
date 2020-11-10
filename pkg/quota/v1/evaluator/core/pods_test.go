@@ -25,9 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/clock"
+	quota "k8s.io/apiserver/pkg/quota/v1"
+	"k8s.io/apiserver/pkg/quota/v1/generic"
 	api "k8s.io/kubernetes/pkg/apis/core"
-	quota "k8s.io/kubernetes/pkg/quota/v1"
-	"k8s.io/kubernetes/pkg/quota/v1/generic"
 	"k8s.io/kubernetes/pkg/util/node"
 )
 
@@ -275,6 +275,24 @@ func TestPodEvaluatorUsage(t *testing.T) {
 				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
 			},
 		},
+		"terminated generic count still appears": {
+			pod: &api.Pod{
+				Spec: api.PodSpec{
+					Containers: []api.Container{{
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{api.ResourceName("example.com/dongle"): resource.MustParse("3")},
+							Limits:   api.ResourceList{api.ResourceName("example.com/dongle"): resource.MustParse("3")},
+						},
+					}},
+				},
+				Status: api.PodStatus{
+					Phase: api.PodSucceeded,
+				},
+			},
+			usage: corev1.ResourceList{
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
+			},
+		},
 		"init container maximums override sum of containers": {
 			pod: &api.Pod{
 				Spec: api.PodSpec{
@@ -417,12 +435,14 @@ func TestPodEvaluatorUsage(t *testing.T) {
 		},
 	}
 	for testName, testCase := range testCases {
-		actual, err := evaluator.Usage(testCase.pod)
-		if err != nil {
-			t.Errorf("%s unexpected error: %v", testName, err)
-		}
-		if !quota.Equals(testCase.usage, actual) {
-			t.Errorf("%s expected: %v, actual: %v", testName, testCase.usage, actual)
-		}
+		t.Run(testName, func(t *testing.T) {
+			actual, err := evaluator.Usage(testCase.pod)
+			if err != nil {
+				t.Error(err)
+			}
+			if !quota.Equals(testCase.usage, actual) {
+				t.Errorf("expected: %v, actual: %v", testCase.usage, actual)
+			}
+		})
 	}
 }

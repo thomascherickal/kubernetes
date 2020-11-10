@@ -28,9 +28,9 @@ import (
 
 	netutil "k8s.io/apimachinery/pkg/util/net"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
-	"k8s.io/klog"
+	pkgversion "k8s.io/component-base/version"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	pkgversion "k8s.io/kubernetes/cmd/kubeadm/app/version"
 )
 
 const (
@@ -40,7 +40,7 @@ const (
 var (
 	kubeReleaseBucketURL  = "https://dl.k8s.io"
 	kubeReleaseRegex      = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-0-9a-zA-Z_\.+]*)?$`)
-	kubeReleaseLabelRegex = regexp.MustCompile(`^[[:lower:]]+(-[-\w_\.]+)?$`)
+	kubeReleaseLabelRegex = regexp.MustCompile(`^((latest|stable)+(-[1-9](\.[1-9]([0-9])?)?)?)\z`)
 	kubeBucketPrefixes    = regexp.MustCompile(`^((release|ci|ci-cross)/)?([-\w_\.+]+)$`)
 )
 

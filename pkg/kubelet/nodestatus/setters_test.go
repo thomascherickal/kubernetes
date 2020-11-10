@@ -36,12 +36,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	cloudprovider "k8s.io/cloud-provider"
 	fakecloud "k8s.io/cloud-provider/fake"
+	"k8s.io/component-base/version"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/kubelet/util/sliceutils"
-	"k8s.io/kubernetes/pkg/version"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 
@@ -50,7 +50,7 @@ import (
 )
 
 const (
-	testKubeletHostname = "127.0.0.1"
+	testKubeletHostname = "hostname"
 )
 
 // TODO(mtaufen): below is ported from the old kubelet_node_status_test.go code, potentially add more test coverage for NodeAddress setter in future
@@ -86,8 +86,8 @@ func TestNodeAddress(t *testing.T) {
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			expectedAddresses: []v1.NodeAddress{
-				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			shouldError: false,
@@ -293,6 +293,94 @@ func TestNodeAddress(t *testing.T) {
 			hostnameOverride: true,
 			shouldError:      false,
 		},
+		{
+			name: "Dual-stack cloud, IPv4 first, no nodeIP",
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			shouldError: false,
+		},
+		{
+			name: "Dual-stack cloud, IPv6 first, no nodeIP",
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			shouldError: false,
+		},
+		{
+			name:   "Dual-stack cloud, IPv4 first, request IPv4",
+			nodeIP: net.ParseIP("0.0.0.0"),
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+			},
+			shouldError: false,
+		},
+		{
+			name:   "Dual-stack cloud, IPv6 first, request IPv4",
+			nodeIP: net.ParseIP("0.0.0.0"),
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+			},
+			shouldError: false,
+		},
+		{
+			name:   "Dual-stack cloud, IPv4 first, request IPv6",
+			nodeIP: net.ParseIP("::"),
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+			},
+			shouldError: false,
+		},
+		{
+			name:   "Dual-stack cloud, IPv6 first, request IPv6",
+			nodeIP: net.ParseIP("::"),
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+			},
+			shouldError: false,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -328,7 +416,7 @@ func TestNodeAddress(t *testing.T) {
 			}
 
 			// construct setter
-			setter := NodeAddress(nodeIP,
+			setter := NodeAddress([]net.IP{nodeIP},
 				nodeIPValidator,
 				hostname,
 				testCase.hostnameOverride,
@@ -345,9 +433,69 @@ func TestNodeAddress(t *testing.T) {
 				return
 			}
 
-			// Sort both sets for consistent equality
-			sortNodeAddresses(testCase.expectedAddresses)
-			sortNodeAddresses(existingNode.Status.Addresses)
+			assert.True(t, apiequality.Semantic.DeepEqual(testCase.expectedAddresses, existingNode.Status.Addresses),
+				"Diff: %s", diff.ObjectDiff(testCase.expectedAddresses, existingNode.Status.Addresses))
+		})
+	}
+}
+
+// We can't test failure or autodetection cases here because the relevant code isn't mockable
+func TestNodeAddress_NoCloudProvider(t *testing.T) {
+	cases := []struct {
+		name              string
+		nodeIPs           []net.IP
+		expectedAddresses []v1.NodeAddress
+	}{
+		{
+			name:    "Single --node-ip",
+			nodeIPs: []net.IP{net.ParseIP("10.1.1.1")},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+		},
+		{
+			name:    "Dual --node-ips",
+			nodeIPs: []net.IP{net.ParseIP("10.1.1.1"), net.ParseIP("fd01::1234")},
+			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fd01::1234"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// testCase setup
+			existingNode := &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname, Annotations: make(map[string]string)},
+				Spec:       v1.NodeSpec{},
+				Status: v1.NodeStatus{
+					Addresses: []v1.NodeAddress{},
+				},
+			}
+
+			nodeIPValidator := func(nodeIP net.IP) error {
+				return nil
+			}
+			nodeAddressesFunc := func() ([]v1.NodeAddress, error) {
+				return nil, fmt.Errorf("not reached")
+			}
+
+			// construct setter
+			setter := NodeAddress(testCase.nodeIPs,
+				nodeIPValidator,
+				testKubeletHostname,
+				false, // hostnameOverridden
+				false, // externalCloudProvider
+				nil,   // cloud
+				nodeAddressesFunc)
+
+			// call setter on existing node
+			err := setter(existingNode)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
 			assert.True(t, apiequality.Semantic.DeepEqual(testCase.expectedAddresses, existingNode.Status.Addresses),
 				"Diff: %s", diff.ObjectDiff(testCase.expectedAddresses, existingNode.Status.Addresses))
@@ -953,7 +1101,7 @@ func TestReadyCondition(t *testing.T) {
 		Status: v1.NodeStatus{
 			Capacity: v1.ResourceList{
 				v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
-				v1.ResourceMemory:           *resource.NewQuantity(10E9, resource.BinarySI),
+				v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
 				v1.ResourcePods:             *resource.NewQuantity(100, resource.DecimalSI),
 				v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
 			},
@@ -1589,19 +1737,6 @@ func TestVolumeLimits(t *testing.T) {
 }
 
 // Test Helpers:
-
-// sortableNodeAddress is a type for sorting []v1.NodeAddress
-type sortableNodeAddress []v1.NodeAddress
-
-func (s sortableNodeAddress) Len() int { return len(s) }
-func (s sortableNodeAddress) Less(i, j int) bool {
-	return (string(s[i].Type) + s[i].Address) < (string(s[j].Type) + s[j].Address)
-}
-func (s sortableNodeAddress) Swap(i, j int) { s[j], s[i] = s[i], s[j] }
-
-func sortNodeAddresses(addrs sortableNodeAddress) {
-	sort.Sort(addrs)
-}
 
 // testEvent is used to record events for tests
 type testEvent struct {

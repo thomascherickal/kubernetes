@@ -23,15 +23,14 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"sigs.k8s.io/structured-merge-diff/fieldpath"
-	"sigs.k8s.io/structured-merge-diff/value"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 // TestFieldsRoundTrip tests that a fields trie can be round tripped as a path set
 func TestFieldsRoundTrip(t *testing.T) {
-	tests := []metav1.Fields{
+	tests := []metav1.FieldsV1{
 		{
-			Raw: []byte(`{"f:metadata":{"f:name":{},".":{}}}`),
+			Raw: []byte(`{"f:metadata":{".":{},"f:name":{}}}`),
 		},
 		EmptyFields,
 	}
@@ -54,11 +53,11 @@ func TestFieldsRoundTrip(t *testing.T) {
 // TestFieldsToSetError tests that errors are picked up by FieldsToSet
 func TestFieldsToSetError(t *testing.T) {
 	tests := []struct {
-		fields    metav1.Fields
+		fields    metav1.FieldsV1
 		errString string
 	}{
 		{
-			fields: metav1.Fields{
+			fields: metav1.FieldsV1{
 				Raw: []byte(`{"k:{invalid json}":{"f:name":{},".":{}}}`),
 			},
 			errString: "ReadObjectCB",
@@ -104,9 +103,9 @@ func BenchmarkSetToFields(b *testing.B) {
 		fieldpath.MakePathOrDie("foo", 0),
 		fieldpath.MakePathOrDie("foo", 1, "bar", "baz"),
 		fieldpath.MakePathOrDie("foo", 1, "bar"),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("first"))),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("first")), "bar"),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("second")), "bar"),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "first")),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "first"), "bar"),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "second"), "bar"),
 	)
 
 	b.ReportAllocs()
@@ -127,9 +126,9 @@ func BenchmarkFieldsToSet(b *testing.B) {
 		fieldpath.MakePathOrDie("foo", 0),
 		fieldpath.MakePathOrDie("foo", 1, "bar", "baz"),
 		fieldpath.MakePathOrDie("foo", 1, "bar"),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("first"))),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("first")), "bar"),
-		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", value.StringValue("second")), "bar"),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "first")),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "first"), "bar"),
+		fieldpath.MakePathOrDie("qux", fieldpath.KeyByFields("name", "second"), "bar"),
 	)
 	fields, err := SetToFields(*set)
 	if err != nil {

@@ -22,9 +22,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/storage/names"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/storage"
 	"k8s.io/kubernetes/pkg/apis/storage/validation"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 // csiDriverStrategy implements behavior for CSIDriver objects
@@ -41,8 +43,18 @@ func (csiDriverStrategy) NamespaceScoped() bool {
 	return false
 }
 
-// ResetBeforeCreate clears the Status field which is not allowed to be set by end users on creation.
+// PrepareForCreate clears the fields for which the corresponding feature is disabled.
 func (csiDriverStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	csiDriver := obj.(*storage.CSIDriver)
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIStorageCapacity) {
+		csiDriver.Spec.StorageCapacity = nil
+	}
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
+		csiDriver.Spec.VolumeLifecycleModes = nil
+	}
+	if !utilfeature.DefaultFeatureGate.Enabled(features.CSIVolumeFSGroupPolicy) {
+		csiDriver.Spec.FSGroupPolicy = nil
+	}
 }
 
 func (csiDriverStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
@@ -62,8 +74,25 @@ func (csiDriverStrategy) AllowCreateOnUpdate() bool {
 	return false
 }
 
-// PrepareForUpdate sets the Status fields which is not allowed to be set by an end user updating a CSIDriver
+// PrepareForUpdate clears the fields for which the corresponding feature is disabled and
+// existing object does not already have that field set. This allows the field to remain when
+// downgrading to a version that has the feature disabled.
 func (csiDriverStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	if old.(*storage.CSIDriver).Spec.StorageCapacity == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIStorageCapacity) {
+		newCSIDriver := obj.(*storage.CSIDriver)
+		newCSIDriver.Spec.StorageCapacity = nil
+	}
+	if old.(*storage.CSIDriver).Spec.VolumeLifecycleModes == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIInlineVolume) {
+		newCSIDriver := obj.(*storage.CSIDriver)
+		newCSIDriver.Spec.VolumeLifecycleModes = nil
+	}
+	if old.(*storage.CSIDriver).Spec.FSGroupPolicy == nil &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.CSIVolumeFSGroupPolicy) {
+		newCSIDriver := obj.(*storage.CSIDriver)
+		newCSIDriver.Spec.FSGroupPolicy = nil
+	}
 }
 
 func (csiDriverStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {

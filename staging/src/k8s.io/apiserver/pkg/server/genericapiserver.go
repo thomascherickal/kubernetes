@@ -40,12 +40,15 @@ import (
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	genericapi "k8s.io/apiserver/pkg/endpoints"
 	"k8s.io/apiserver/pkg/endpoints/discovery"
+	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
+	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/routes"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	utilopenapi "k8s.io/apiserver/pkg/util/openapi"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	openapibuilder "k8s.io/kube-openapi/pkg/builder"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kube-openapi/pkg/handler"
@@ -77,6 +80,10 @@ type APIGroupInfo struct {
 	NegotiatedSerializer runtime.NegotiatedSerializer
 	// ParameterCodec performs conversions for query parameters passed to API calls
 	ParameterCodec runtime.ParameterCodec
+
+	// StaticOpenAPISpec is the spec derived from the definitions of all resources installed together.
+	// It is set during InstallAPIGroups, InstallAPIGroup, and InstallLegacyAPIGroup.
+	StaticOpenAPISpec *spec.Swagger
 }
 
 // GenericAPIServer contains state for a Kubernetes cluster api server.
@@ -146,14 +153,19 @@ type GenericAPIServer struct {
 	preShutdownHooksCalled bool
 
 	// healthz checks
-	healthzLock                sync.Mutex
-	healthzChecks              []healthz.HealthChecker
-	healthzChecksInstalled     bool
-	readyzLock                 sync.Mutex
-	readyzChecks               []healthz.HealthChecker
-	readyzChecksInstalled      bool
-	maxStartupSequenceDuration time.Duration
-	healthzClock               clock.Clock
+	healthzLock            sync.Mutex
+	healthzChecks          []healthz.HealthChecker
+	healthzChecksInstalled bool
+	// livez checks
+	livezLock            sync.Mutex
+	livezChecks          []healthz.HealthChecker
+	livezChecksInstalled bool
+	// readyz checks
+	readyzLock            sync.Mutex
+	readyzChecks          []healthz.HealthChecker
+	readyzChecksInstalled bool
+	livezGracePeriod      time.Duration
+	livezClock            clock.Clock
 	// the readiness stop channel is used to signal that the apiserver has initiated a shutdown sequence, this
 	// will cause readyz to return unhealthy.
 	readinessStopCh chan struct{}
@@ -170,10 +182,6 @@ type GenericAPIServer struct {
 	// and the kind associated with a given resource. As resources are installed, they are registered here.
 	EquivalentResourceRegistry runtime.EquivalentResourceRegistry
 
-	// enableAPIResponseCompression indicates whether API Responses should support compression
-	// if the client requests it via Accept-Encoding
-	enableAPIResponseCompression bool
-
 	// delegationTarget is the next delegate in the chain. This is never nil.
 	delegationTarget DelegationTarget
 
@@ -188,6 +196,9 @@ type GenericAPIServer struct {
 	// The limit on the request body size that would be accepted and decoded in a write request.
 	// 0 means no limit.
 	maxRequestBodyBytes int64
+
+	// APIServerID is the ID of this API server
+	APIServerID string
 }
 
 // DelegationTarget is an interface which allows for composition of API servers with top level handling that works
@@ -281,7 +292,12 @@ func (s *GenericAPIServer) PrepareRun() preparedGenericAPIServer {
 	}
 
 	s.installHealthz()
-	s.installReadyz(s.readinessStopCh)
+	s.installLivez()
+	err := s.addReadyzShutdownCheck(s.readinessStopCh)
+	if err != nil {
+		klog.Errorf("Failed to install readyz shutdown check %s", err)
+	}
+	s.installReadyz()
 
 	// Register audit backend preShutdownHook.
 	if s.AuditBackend != nil {
@@ -304,13 +320,19 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 
 	go func() {
 		defer close(delayedStopCh)
+
 		<-stopCh
+
+		// As soon as shutdown is initiated, /readyz should start returning failure.
+		// This gives the load balancer a window defined by ShutdownDelayDuration to detect that /readyz is red
+		// and stop sending traffic to this server.
+		close(s.readinessStopCh)
 
 		time.Sleep(s.ShutdownDelayDuration)
 	}()
 
 	// close socket after delayed stopCh
-	err := s.NonBlockingRun(delayedStopCh)
+	stoppedCh, err := s.NonBlockingRun(delayedStopCh)
 	if err != nil {
 		return err
 	}
@@ -325,6 +347,8 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 
 	// wait for the delayed stopCh before closing the handler chain (it rejects everything after Wait has been called).
 	<-delayedStopCh
+	// wait for stoppedCh that is closed when the graceful termination (server.Shutdown) is finished.
+	<-stoppedCh
 
 	// Wait for all requests to finish, which are bounded by the RequestTimeout variable.
 	s.HandlerChainWaitGroup.Wait()
@@ -334,7 +358,8 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 
 // NonBlockingRun spawns the secure http server. An error is
 // returned if the secure port cannot be listened on.
-func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
+// The returned channel is closed when the (asynchronous) termination is finished.
+func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) (<-chan struct{}, error) {
 	// Use an stop channel to allow graceful shutdown without dropping audit events
 	// after http server shutdown.
 	auditStopCh := make(chan struct{})
@@ -343,7 +368,7 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 	// before http server start serving. Otherwise the Backend.ProcessEvents call might block.
 	if s.AuditBackend != nil {
 		if err := s.AuditBackend.Run(auditStopCh); err != nil {
-			return fmt.Errorf("failed to run the audit backend: %v", err)
+			return nil, fmt.Errorf("failed to run the audit backend: %v", err)
 		}
 	}
 
@@ -356,7 +381,7 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 		if err != nil {
 			close(internalStopCh)
 			close(auditStopCh)
-			return err
+			return nil, err
 		}
 	}
 
@@ -365,7 +390,6 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 	// ensure cleanup.
 	go func() {
 		<-stopCh
-		close(s.readinessStopCh)
 		close(internalStopCh)
 		if stoppedCh != nil {
 			<-stoppedCh
@@ -380,7 +404,7 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 		klog.Errorf("Unable to send systemd daemon successful start message: %v\n", err)
 	}
 
-	return nil
+	return stoppedCh, nil
 }
 
 // installAPIResources is a private method for installing the REST storage backing each api groupversionresource
@@ -396,6 +420,15 @@ func (s *GenericAPIServer) installAPIResources(apiPrefix string, apiGroupInfo *A
 			apiGroupVersion.OptionsExternalVersion = apiGroupInfo.OptionsExternalVersion
 		}
 		apiGroupVersion.OpenAPIModels = openAPIModels
+
+		if openAPIModels != nil && utilfeature.DefaultFeatureGate.Enabled(features.ServerSideApply) {
+			typeConverter, err := fieldmanager.NewTypeConverter(openAPIModels, false)
+			if err != nil {
+				return err
+			}
+			apiGroupVersion.TypeConverter = typeConverter
+		}
+
 		apiGroupVersion.MaxRequestBodyBytes = s.maxRequestBodyBytes
 
 		if err := apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer); err != nil {
@@ -551,6 +584,9 @@ func (s *GenericAPIServer) getOpenAPIModels(apiPrefix string, apiGroupInfos ...*
 	openAPISpec, err := openapibuilder.BuildOpenAPIDefinitionsForResources(s.openAPIConfig, resourceNames...)
 	if err != nil {
 		return nil, err
+	}
+	for _, apiGroupInfo := range apiGroupInfos {
+		apiGroupInfo.StaticOpenAPISpec = openAPISpec
 	}
 	return utilopenapi.ToProtoModels(openAPISpec)
 }

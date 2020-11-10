@@ -20,31 +20,54 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
+	compbasemetrics "k8s.io/component-base/metrics"
+	"k8s.io/component-base/metrics/legacyregistry"
 )
 
+/*
+ * By default, all the following metrics are defined as falling under
+ * ALPHA stability level https://github.com/kubernetes/enhancements/blob/master/keps/sig-instrumentation/20190404-kubernetes-control-plane-metrics-stability.md#stability-classes)
+ *
+ * Promoting the stability level of the metric is a responsibility of the component owner, since it
+ * involves explicitly acknowledging support for the metric across multiple releases, in accordance with
+ * the metric stability policy.
+ */
 var (
-	etcdRequestLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+	etcdRequestLatency = compbasemetrics.NewHistogramVec(
+		&compbasemetrics.HistogramOpts{
 			Name: "etcd_request_duration_seconds",
 			Help: "Etcd request latency in seconds for each operation and object type.",
+			// Keeping it similar to the buckets used by the apiserver_request_duration_seconds metric so that
+			// api latency and etcd latency can be more comparable side by side.
+			Buckets: []float64{.005, .01, .025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7,
+				0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 60},
+			StabilityLevel: compbasemetrics.ALPHA,
 		},
 		[]string{"operation", "type"},
 	)
-	objectCounts = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "etcd_object_counts",
-			Help: "Number of stored objects at the time of last check split by kind.",
+	objectCounts = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Name:           "etcd_object_counts",
+			Help:           "Number of stored objects at the time of last check split by kind.",
+			StabilityLevel: compbasemetrics.ALPHA,
 		},
 		[]string{"resource"},
 	)
-
-	deprecatedEtcdRequestLatenciesSummary = prometheus.NewSummaryVec(
-		prometheus.SummaryOpts{
-			Name: "etcd_request_latencies_summary",
-			Help: "(Deprecated) Etcd request latency summary in microseconds for each operation and object type.",
+	dbTotalSize = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Name:           "etcd_db_total_size_in_bytes",
+			Help:           "Total size of the etcd database file physically allocated in bytes.",
+			StabilityLevel: compbasemetrics.ALPHA,
 		},
-		[]string{"operation", "type"},
+		[]string{"endpoint"},
+	)
+	etcdBookmarkCounts = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Name:           "etcd_bookmark_counts",
+			Help:           "Number of etcd bookmarks (progress notify events) split by kind.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"resource"},
 	)
 )
 
@@ -54,11 +77,10 @@ var registerMetrics sync.Once
 func Register() {
 	// Register the metrics.
 	registerMetrics.Do(func() {
-		prometheus.MustRegister(etcdRequestLatency)
-		prometheus.MustRegister(objectCounts)
-
-		// TODO(danielqsj): Remove the following metrics, they are deprecated
-		prometheus.MustRegister(deprecatedEtcdRequestLatenciesSummary)
+		legacyregistry.MustRegister(etcdRequestLatency)
+		legacyregistry.MustRegister(objectCounts)
+		legacyregistry.MustRegister(dbTotalSize)
+		legacyregistry.MustRegister(etcdBookmarkCounts)
 	})
 }
 
@@ -70,22 +92,24 @@ func UpdateObjectCount(resourcePrefix string, count int64) {
 // RecordEtcdRequestLatency sets the etcd_request_duration_seconds metrics.
 func RecordEtcdRequestLatency(verb, resource string, startTime time.Time) {
 	etcdRequestLatency.WithLabelValues(verb, resource).Observe(sinceInSeconds(startTime))
-	deprecatedEtcdRequestLatenciesSummary.WithLabelValues(verb, resource).Observe(sinceInMicroseconds(startTime))
+}
+
+// RecordEtcdBookmark updates the etcd_bookmark_counts metric.
+func RecordEtcdBookmark(resource string) {
+	etcdBookmarkCounts.WithLabelValues(resource).Inc()
 }
 
 // Reset resets the etcd_request_duration_seconds metric.
 func Reset() {
 	etcdRequestLatency.Reset()
-
-	deprecatedEtcdRequestLatenciesSummary.Reset()
-}
-
-// sinceInMicroseconds gets the time since the specified start in microseconds.
-func sinceInMicroseconds(start time.Time) float64 {
-	return float64(time.Since(start).Nanoseconds() / time.Microsecond.Nanoseconds())
 }
 
 // sinceInSeconds gets the time since the specified start in seconds.
 func sinceInSeconds(start time.Time) float64 {
 	return time.Since(start).Seconds()
+}
+
+// UpdateEtcdDbSize sets the etcd_db_total_size_in_bytes metric.
+func UpdateEtcdDbSize(ep string, size int64) {
+	dbTotalSize.WithLabelValues(ep).Set(float64(size))
 }

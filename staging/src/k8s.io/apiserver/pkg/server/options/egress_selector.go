@@ -18,6 +18,7 @@ package options
 
 import (
 	"fmt"
+
 	"github.com/spf13/pflag"
 	"k8s.io/utils/path"
 
@@ -68,7 +69,7 @@ func (o *EgressSelectorOptions) ApplyTo(c *server.Config) error {
 		return fmt.Errorf("failed to validate egress selector configuration: %v", errs.ToAggregate())
 	}
 
-	cs, err := server.NewEgressSelector(npConfig)
+	cs, err := egressselector.NewEgressSelector(npConfig)
 	if err != nil {
 		return fmt.Errorf("failed to setup egress selector with config %#v: %v", npConfig, err)
 	}
@@ -84,7 +85,7 @@ func (o *EgressSelectorOptions) Validate() []error {
 
 	errs := []error{}
 
-	if exists, err := path.Exists(path.CheckFollowSymlink, o.ConfigFile); exists == false || err != nil {
+	if exists, err := path.Exists(path.CheckFollowSymlink, o.ConfigFile); !exists || err != nil {
 		errs = append(errs, fmt.Errorf("egress-selector-config-file %s does not exist", o.ConfigFile))
 	}
 

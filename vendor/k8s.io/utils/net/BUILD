@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "ipnet.go",
         "net.go",
+        "port.go",
     ],
     importmap = "k8s.io/kubernetes/vendor/k8s.io/utils/net",
     importpath = "k8s.io/utils/net",
@@ -20,7 +21,10 @@ filegroup(
 
 filegroup(
     name = "all-srcs",
-    srcs = [":package-srcs"],
+    srcs = [
+        ":package-srcs",
+        "//vendor/k8s.io/utils/net/ebtables:all-srcs",
+    ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
 )

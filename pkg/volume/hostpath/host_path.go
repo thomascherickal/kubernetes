@@ -21,13 +21,15 @@ import (
 	"os"
 	"regexp"
 
+	"k8s.io/mount-utils"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
 	"k8s.io/kubernetes/pkg/volume/validation"
 )
@@ -81,10 +83,6 @@ func (plugin *hostPathPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
 func (plugin *hostPathPlugin) CanSupport(spec *volume.Spec) bool {
 	return (spec.PersistentVolume != nil && spec.PersistentVolume.Spec.HostPath != nil) ||
 		(spec.Volume != nil && spec.Volume.HostPath != nil)
-}
-
-func (plugin *hostPathPlugin) IsMigratedToCSI() bool {
-	return false
 }
 
 func (plugin *hostPathPlugin) RequiresRemount() bool {
@@ -162,7 +160,7 @@ func (plugin *hostPathPlugin) NewDeleter(spec *volume.Spec) (volume.Deleter, err
 
 func (plugin *hostPathPlugin) NewProvisioner(options volume.VolumeOptions) (volume.Provisioner, error) {
 	if !plugin.config.ProvisioningEnabled {
-		return nil, fmt.Errorf("Provisioning in volume plugin %q is disabled", plugin.GetPluginName())
+		return nil, fmt.Errorf("provisioning in volume plugin %q is disabled", plugin.GetPluginName())
 	}
 	return newProvisioner(options, plugin.host, plugin)
 }
@@ -207,7 +205,7 @@ type hostPathMounter struct {
 	*hostPath
 	readOnly bool
 	mounter  mount.Interface
-	hu       mount.HostUtils
+	hu       hostutil.HostUtils
 }
 
 var _ volume.Mounter = &hostPathMounter{}
@@ -343,7 +341,7 @@ func getVolumeSource(spec *volume.Spec) (*v1.HostPathVolumeSource, bool, error) 
 		return spec.PersistentVolume.Spec.HostPath, spec.ReadOnly, nil
 	}
 
-	return nil, false, fmt.Errorf("Spec does not reference an HostPath volume type")
+	return nil, false, fmt.Errorf("spec does not reference an HostPath volume type")
 }
 
 type hostPathTypeChecker interface {
@@ -359,9 +357,8 @@ type hostPathTypeChecker interface {
 }
 
 type fileTypeChecker struct {
-	path   string
-	exists bool
-	hu     mount.HostUtils
+	path string
+	hu   hostutil.HostUtils
 }
 
 func (ftc *fileTypeChecker) Exists() bool {
@@ -373,11 +370,15 @@ func (ftc *fileTypeChecker) IsFile() bool {
 	if !ftc.Exists() {
 		return false
 	}
-	return !ftc.IsDir()
+	pathType, err := ftc.hu.GetFileType(ftc.path)
+	if err != nil {
+		return false
+	}
+	return string(pathType) == string(v1.HostPathFile)
 }
 
 func (ftc *fileTypeChecker) MakeFile() error {
-	return ftc.hu.MakeFile(ftc.path)
+	return makeFile(ftc.path)
 }
 
 func (ftc *fileTypeChecker) IsDir() bool {
@@ -392,7 +393,7 @@ func (ftc *fileTypeChecker) IsDir() bool {
 }
 
 func (ftc *fileTypeChecker) MakeDir() error {
-	return ftc.hu.MakeDir(ftc.path)
+	return makeDir(ftc.path)
 }
 
 func (ftc *fileTypeChecker) IsBlock() bool {
@@ -423,12 +424,12 @@ func (ftc *fileTypeChecker) GetPath() string {
 	return ftc.path
 }
 
-func newFileTypeChecker(path string, hu mount.HostUtils) hostPathTypeChecker {
+func newFileTypeChecker(path string, hu hostutil.HostUtils) hostPathTypeChecker {
 	return &fileTypeChecker{path: path, hu: hu}
 }
 
 // checkType checks whether the given path is the exact pathType
-func checkType(path string, pathType *v1.HostPathType, hu mount.HostUtils) error {
+func checkType(path string, pathType *v1.HostPathType, hu hostutil.HostUtils) error {
 	return checkTypeInternal(newFileTypeChecker(path, hu), pathType)
 }
 
@@ -468,5 +469,33 @@ func checkTypeInternal(ftc hostPathTypeChecker, pathType *v1.HostPathType) error
 		return fmt.Errorf("%s is an invalid volume type", *pathType)
 	}
 
+	return nil
+}
+
+// makeDir creates a new directory.
+// If pathname already exists as a directory, no error is returned.
+// If pathname already exists as a file, an error is returned.
+func makeDir(pathname string) error {
+	err := os.MkdirAll(pathname, os.FileMode(0755))
+	if err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// makeFile creates an empty file.
+// If pathname already exists, whether a file or directory, no error is returned.
+func makeFile(pathname string) error {
+	f, err := os.OpenFile(pathname, os.O_CREATE, os.FileMode(0644))
+	if f != nil {
+		f.Close()
+	}
+	if err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+	}
 	return nil
 }

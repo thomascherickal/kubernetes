@@ -28,14 +28,15 @@ import (
 	"github.com/go-openapi/spec"
 	"github.com/google/go-cmp/cmp"
 	fuzz "github.com/google/gofuzz"
-	openapi_v2 "github.com/googleapis/gnostic/OpenAPIv2"
 	"github.com/googleapis/gnostic/compiler"
+	openapi_v2 "github.com/googleapis/gnostic/openapiv2"
 	"gopkg.in/yaml.v2"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/kube-openapi/pkg/util/proto"
+	"k8s.io/utils/pointer"
 )
 
 func Test_ConvertJSONSchemaPropsToOpenAPIv2Schema(t *testing.T) {
@@ -171,6 +172,63 @@ func Test_ConvertJSONSchemaPropsToOpenAPIv2SchemaByType(t *testing.T) {
 				Nullable: true,
 			},
 			expected: new(spec.Schema),
+		},
+		{
+			name: "nullable required",
+			in: &apiextensions.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensions.JSONSchemaProps{
+					"a": {
+						Nullable: true,
+						Type:     "string",
+					},
+					"b": {
+						Nullable: true,
+						Type:     "string",
+					},
+					"c": {
+						Type: "string",
+					},
+				},
+				Required: []string{"a", "c"},
+			},
+			expected: &spec.Schema{
+				SchemaProps: spec.SchemaProps{
+					Type: []string{"object"},
+					Properties: map[string]spec.Schema{
+						"a": {},
+						"b": {},
+						"c": {
+							SchemaProps: spec.SchemaProps{
+								Type: []string{"string"},
+							},
+						},
+					},
+					Required: []string{"c"},
+				},
+			},
+		},
+		{
+			name: "nullable required additionalProperties",
+			in: &apiextensions.JSONSchemaProps{
+				Type: "object",
+				AdditionalProperties: &apiextensions.JSONSchemaPropsOrBool{
+					Schema: &apiextensions.JSONSchemaProps{
+						Nullable: true,
+						Type:     "string",
+					},
+				},
+				Required: []string{"a", "c"},
+			},
+			expected: &spec.Schema{
+				SchemaProps: spec.SchemaProps{
+					Type: []string{"object"},
+					AdditionalProperties: &spec.SchemaOrBool{
+						Allows: true,
+						Schema: &spec.Schema{},
+					},
+				},
+			},
 		},
 		{
 			name: "title",
@@ -586,6 +644,31 @@ func Test_ConvertJSONSchemaPropsToOpenAPIv2SchemaByType(t *testing.T) {
 				WithExample(testStr),
 			expectDiff: true,
 		},
+		{
+			name: "preserve-unknown-fields in arrays",
+			in: &apiextensions.JSONSchemaProps{
+				XPreserveUnknownFields: pointer.BoolPtr(true),
+				Type:                   "array",
+				Items: &apiextensions.JSONSchemaPropsOrArray{Schema: &apiextensions.JSONSchemaProps{
+					Type: "string",
+				}},
+			},
+			expected: withVendorExtensions(new(spec.Schema), "x-kubernetes-preserve-unknown-fields", true),
+		},
+		{
+			name: "preserve-unknown-fields in objects",
+			in: &apiextensions.JSONSchemaProps{
+				XPreserveUnknownFields: pointer.BoolPtr(true),
+				Type:                   "object",
+				Properties: map[string]apiextensions.JSONSchemaProps{
+					"foo": {
+						Type: "string",
+					},
+				},
+			},
+			expected: withVendorExtensions(new(spec.Schema), "x-kubernetes-preserve-unknown-fields", true).
+				Typed("object", ""),
+		},
 	}
 
 	for _, test := range tests {
@@ -607,6 +690,11 @@ func Test_ConvertJSONSchemaPropsToOpenAPIv2SchemaByType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func withVendorExtensions(s *spec.Schema, key string, value interface{}) *spec.Schema {
+	s.VendorExtensible.AddExtension(key, value)
+	return s
 }
 
 func refEqual(x spec.Ref, y spec.Ref) bool {
@@ -827,6 +915,34 @@ func fuzzFuncs(f *fuzz.Fuzzer, refFunc func(ref *spec.Ref, c fuzz.Continue, visi
 			// do nothing for examples and defaults. These are free form JSON fields.
 		},
 	)
+}
+
+func TestFilterOut(t *testing.T) {
+	type Test struct {
+		name            string
+		input           []string
+		x               string
+		expected        []string
+		expectedChanged bool
+	}
+	for _, tt := range []Test{
+		{"nil", nil, "foo", nil, false},
+		{"empty", []string{}, "foo", []string{}, false},
+		{"foo", []string{"foo"}, "foo", nil, true},
+		{"aaa", []string{"a", "a", "a"}, "a", nil, true},
+		{"abc", []string{"a", "b", "c"}, "c", []string{"a", "b"}, true},
+		{"abbbcc", []string{"a", "b", "b", "b", "c", "c"}, "b", []string{"a", "c", "c"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, gotChanged := filterOut(tt.input, tt.x)
+			if !reflect.DeepEqual(tt.expected, got) {
+				t.Errorf("expected slice %v, got %v", tt.expected, got)
+			}
+			if tt.expectedChanged != gotChanged {
+				t.Errorf("expected changed %v, got %v", tt.expected, got)
+			}
+		})
+	}
 }
 
 func max(i, j int) int {

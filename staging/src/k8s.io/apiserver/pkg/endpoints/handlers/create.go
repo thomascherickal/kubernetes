@@ -27,7 +27,8 @@ import (
 	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metainternalversionscheme "k8s.io/apimachinery/pkg/apis/meta/internalversion/scheme"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,14 +44,16 @@ import (
 	utiltrace "k8s.io/utils/trace"
 )
 
+var namespaceGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"}
+
 func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Interface, includeName bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		// For performance tracking purposes.
-		trace := utiltrace.New("Create", utiltrace.Field{"url", req.URL.Path})
+		trace := utiltrace.New("Create", utiltrace.Field{Key: "url", Value: req.URL.Path}, utiltrace.Field{Key: "user-agent", Value: &lazyTruncatedUserAgent{req}}, utiltrace.Field{Key: "client", Value: &lazyClientIP{req}})
 		defer trace.LogIfLong(500 * time.Millisecond)
 
 		if isDryRun(req.URL) && !utilfeature.DefaultFeatureGate.Enabled(features.DryRun) {
-			scope.err(errors.NewBadRequest("the dryRun alpha feature is disabled"), w, req)
+			scope.err(errors.NewBadRequest("the dryRun feature is disabled"), w, req)
 			return
 		}
 
@@ -75,7 +78,6 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 
 		ctx, cancel := context.WithTimeout(req.Context(), timeout)
 		defer cancel()
-		ctx = request.WithNamespace(ctx, namespace)
 		outputMediaType, _, err := negotiation.NegotiateOutputMediaType(req, scope.Serializer, scope)
 		if err != nil {
 			scope.err(err, w, req)
@@ -99,7 +101,7 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 
 		options := &metav1.CreateOptions{}
 		values := req.URL.Query()
-		if err := metainternalversion.ParameterCodec.DecodeParameters(values, scope.MetaGroupVersion, options); err != nil {
+		if err := metainternalversionscheme.ParameterCodec.DecodeParameters(values, scope.MetaGroupVersion, options); err != nil {
 			err = errors.NewBadRequest(err.Error())
 			scope.err(err, w, req)
 			return
@@ -127,41 +129,24 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 		}
 		trace.Step("Conversion done")
 
+		// On create, get name from new object if unset
+		if len(name) == 0 {
+			_, name, _ = scope.Namer.ObjectName(obj)
+		}
+		if len(namespace) == 0 && *gvk == namespaceGVK {
+			namespace = name
+		}
+		ctx = request.WithNamespace(ctx, namespace)
+
 		ae := request.AuditEventFrom(ctx)
 		admit = admission.WithAudit(admit, ae)
 		audit.LogRequestObject(ae, obj, scope.Resource, scope.Subresource, scope.Serializer)
 
 		userInfo, _ := request.UserFrom(ctx)
 
-		// On create, get name from new object if unset
-		if len(name) == 0 {
-			_, name, _ = scope.Namer.ObjectName(obj)
-		}
-		admissionAttributes := admission.NewAttributesRecord(obj, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Create, options, dryrun.IsDryRun(options.DryRun), userInfo)
-		if mutatingAdmission, ok := admit.(admission.MutationInterface); ok && mutatingAdmission.Handles(admission.Create) {
-			err = mutatingAdmission.Admit(ctx, admissionAttributes, scope)
-			if err != nil {
-				scope.err(err, w, req)
-				return
-			}
-		}
-
-		if scope.FieldManager != nil {
-			liveObj, err := scope.Creater.New(scope.Kind)
-			if err != nil {
-				scope.err(fmt.Errorf("failed to create new object (Create for %v): %v", scope.Kind, err), w, req)
-				return
-			}
-
-			obj, err = scope.FieldManager.Update(liveObj, obj, managerOrUserAgent(options.FieldManager, req.UserAgent()))
-			if err != nil {
-				scope.err(fmt.Errorf("failed to update object (Create for %v) managed fields: %v", scope.Kind, err), w, req)
-				return
-			}
-		}
-
 		trace.Step("About to store object in database")
-		result, err := finishRequest(timeout, func() (runtime.Object, error) {
+		admissionAttributes := admission.NewAttributesRecord(obj, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Create, options, dryrun.IsDryRun(options.DryRun), userInfo)
+		requestFunc := func() (runtime.Object, error) {
 			return r.Create(
 				ctx,
 				name,
@@ -169,6 +154,30 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 				rest.AdmissionToValidateObjectFunc(admit, admissionAttributes, scope),
 				options,
 			)
+		}
+		result, err := finishRequest(timeout, func() (runtime.Object, error) {
+			if scope.FieldManager != nil {
+				liveObj, err := scope.Creater.New(scope.Kind)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create new object (Create for %v): %v", scope.Kind, err)
+				}
+				obj = scope.FieldManager.UpdateNoErrors(liveObj, obj, managerOrUserAgent(options.FieldManager, req.UserAgent()))
+			}
+			if mutatingAdmission, ok := admit.(admission.MutationInterface); ok && mutatingAdmission.Handles(admission.Create) {
+				if err := mutatingAdmission.Admit(ctx, admissionAttributes, scope); err != nil {
+					return nil, err
+				}
+			}
+			result, err := requestFunc()
+			// If the object wasn't committed to storage because it's serialized size was too large,
+			// it is safe to remove managedFields (which can be large) and try again.
+			if isTooLargeError(err) {
+				if accessor, accessorErr := meta.Accessor(obj); accessorErr == nil {
+					accessor.SetManagedFields(nil)
+					result, err = requestFunc()
+				}
+			}
+			return result, err
 		})
 		if err != nil {
 			scope.err(err, w, req)

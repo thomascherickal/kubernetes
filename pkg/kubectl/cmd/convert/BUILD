@@ -24,7 +24,6 @@ go_library(
         "//pkg/apis/policy/install:go_default_library",
         "//pkg/apis/rbac/install:go_default_library",
         "//pkg/apis/scheduling/install:go_default_library",
-        "//pkg/apis/settings/install:go_default_library",
         "//pkg/apis/storage/install:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/unstructured:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/runtime:go_default_library",
@@ -37,7 +36,7 @@ go_library(
         "//staging/src/k8s.io/kubectl/pkg/util/templates:go_default_library",
         "//staging/src/k8s.io/kubectl/pkg/validation:go_default_library",
         "//vendor/github.com/spf13/cobra:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
     ],
 )
 

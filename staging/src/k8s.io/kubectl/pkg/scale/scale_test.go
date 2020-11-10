@@ -17,34 +17,58 @@ limitations under the License.
 package scale
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	api "k8s.io/apimachinery/pkg/apis/testapigroup/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
 	fakescale "k8s.io/client-go/scale/fake"
 	testcore "k8s.io/client-go/testing"
 )
 
-func TestReplicationControllerScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+var (
+	rcgvr = schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "replicationcontrollers",
 	}
-	scaleClientExpectedAction := []string{"get", "update", "get"}
+	rsgvr = schema.GroupVersionResource{
+		Group:    "extensions",
+		Version:  "v1beta1",
+		Resource: "replicasets",
+	}
+	deploygvr = schema.GroupVersionResource{
+		Group:    "apps",
+		Version:  "v1",
+		Resource: "deployments",
+	}
+	stsgvr = schema.GroupVersionResource{
+		Group:    "apps",
+		Version:  "v1",
+		Resource: "statefulsets",
+	}
+)
+
+func TestReplicationControllerScaleRetry(t *testing.T) {
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
+	}
+	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("replicationcontrollers", "foo-v1", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo-v1"
 	namespace := metav1.NamespaceDefault
 
-	scaleFunc := ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "", Resource: "replicationcontrollers"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rcgvr, false)
 	pass, err := scaleFunc()
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -52,9 +76,9 @@ func TestReplicationControllerScaleRetry(t *testing.T) {
 	if err != nil {
 		t.Errorf("Did not expect an error on update conflict failure, got %v", err)
 	}
-	preconditions = ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "", Resource: "replicationcontrollers"})
-	pass, err = scaleFunc()
+	preconditions := ScalePrecondition{3, ""}
+	scaleFunc = ScaleCondition(scaler, &preconditions, namespace, name, count, nil, rcgvr, false)
+	_, err = scaleFunc()
 	if err == nil {
 		t.Errorf("Expected error on precondition failure")
 	}
@@ -70,18 +94,17 @@ func TestReplicationControllerScaleRetry(t *testing.T) {
 }
 
 func TestReplicationControllerScaleInvalid(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicationcontrollers", "foo-v1", 1, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo-v1"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "", Resource: "replicationcontrollers"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rcgvr, false)
 	pass, err := scaleFunc()
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -101,13 +124,12 @@ func TestReplicationControllerScaleInvalid(t *testing.T) {
 }
 
 func TestReplicationControllerScale(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicationcontrollers", "foo-v1", 2, nil)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo-v1"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "", Resource: "replicationcontrollers"})
+	err := scaler.Scale("default", name, count, nil, nil, nil, rcgvr, false)
 
 	if err != nil {
 		t.Fatalf("unexpected error occurred = %v while scaling the resource", err)
@@ -130,7 +152,7 @@ func TestReplicationControllerScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "", Resource: "replicationcontrollers"})
+	err := scaler.Scale("default", name, count, &preconditions, nil, nil, rcgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but none was returned")
 	}
@@ -146,18 +168,17 @@ func TestReplicationControllerScaleFailsPreconditions(t *testing.T) {
 }
 
 func TestDeploymentScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
-	scaleClientExpectedAction := []string{"get", "update", "get"}
+	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("deployments", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := &ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "deployments"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, deploygvr, false)
 	pass, err := scaleFunc()
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -165,9 +186,9 @@ func TestDeploymentScaleRetry(t *testing.T) {
 	if err != nil {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
-	preconditions = &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "deployments"})
-	pass, err = scaleFunc()
+	preconditions := &ScalePrecondition{3, ""}
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, deploygvr, false)
+	_, err = scaleFunc()
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -183,13 +204,12 @@ func TestDeploymentScaleRetry(t *testing.T) {
 }
 
 func TestDeploymentScale(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("deployments", "foo", 2, nil)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "apps", Resource: "deployments"})
+	err := scaler.Scale("default", name, count, nil, nil, nil, deploygvr, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,18 +225,17 @@ func TestDeploymentScale(t *testing.T) {
 }
 
 func TestDeploymentScaleInvalid(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	scaleClientExpectedAction := []string{"patch"}
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("deployments", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "deployments"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, deploygvr, false)
 	pass, err := scaleFunc()
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -242,7 +261,7 @@ func TestDeploymentScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "apps", Resource: "deployments"})
+	err := scaler.Scale("default", name, count, &preconditions, nil, nil, deploygvr, false)
 	if err == nil {
 		t.Fatal("exptected to get an error but none was returned")
 	}
@@ -258,13 +277,12 @@ func TestDeploymentScaleFailsPreconditions(t *testing.T) {
 }
 
 func TestStatefulSetScale(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("statefulsets", "foo", 2, nil)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "apps", Resource: "statefulset"})
+	err := scaler.Scale("default", name, count, nil, nil, nil, stsgvr, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,18 +298,17 @@ func TestStatefulSetScale(t *testing.T) {
 }
 
 func TestStatefulSetScaleRetry(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update", "get"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	scaleClientExpectedAction := []string{"patch", "get"}
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("statefulsets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := &ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "statefulsets"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, stsgvr, false)
 	pass, err := scaleFunc()
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -299,9 +316,9 @@ func TestStatefulSetScaleRetry(t *testing.T) {
 	if err != nil {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
-	preconditions = &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "statefulsets"})
-	pass, err = scaleFunc()
+	preconditions := &ScalePrecondition{3, ""}
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, stsgvr, false)
+	_, err = scaleFunc()
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -317,18 +334,17 @@ func TestStatefulSetScaleRetry(t *testing.T) {
 }
 
 func TestStatefulSetScaleInvalid(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	scaleClientExpectedAction := []string{"patch"}
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
 	scaleClient := createFakeScaleClient("statefulsets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "apps", Resource: "statefulsets"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, stsgvr, false)
 	pass, err := scaleFunc()
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -354,7 +370,7 @@ func TestStatefulSetScaleFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "apps", Resource: "statefulsets"})
+	err := scaler.Scale("default", name, count, &preconditions, nil, nil, stsgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but none was returned")
 	}
@@ -370,13 +386,12 @@ func TestStatefulSetScaleFailsPreconditions(t *testing.T) {
 }
 
 func TestReplicaSetScale(t *testing.T) {
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicasets", "foo", 10, nil)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "extensions", Resource: "replicasets"})
+	err := scaler.Scale("default", name, count, nil, nil, nil, rsgvr, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,18 +407,17 @@ func TestReplicaSetScale(t *testing.T) {
 }
 
 func TestReplicaSetScaleRetry(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewConflict(api.Resource("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewConflict(api.Resource("Status"), "foo", nil),
 	}
-	scaleClientExpectedAction := []string{"get", "update", "get"}
+	scaleClientExpectedAction := []string{"patch", "get"}
 	scaleClient := createFakeScaleClient("replicasets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := &ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "extensions", Resource: "replicasets"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rsgvr, false)
 	pass, err := scaleFunc()
 	if pass != false {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -411,9 +425,9 @@ func TestReplicaSetScaleRetry(t *testing.T) {
 	if err != nil {
 		t.Errorf("Did not expect an error on update failure, got %v", err)
 	}
-	preconditions = &ScalePrecondition{3, ""}
-	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, schema.GroupResource{Group: "extensions", Resource: "replicasets"})
-	pass, err = scaleFunc()
+	preconditions := &ScalePrecondition{3, ""}
+	scaleFunc = ScaleCondition(scaler, preconditions, namespace, name, count, nil, rsgvr, false)
+	_, err = scaleFunc()
 	if err == nil {
 		t.Error("Expected error on precondition failure")
 	}
@@ -429,18 +443,17 @@ func TestReplicaSetScaleRetry(t *testing.T) {
 }
 
 func TestReplicaSetScaleInvalid(t *testing.T) {
-	verbsOnError := map[string]*kerrors.StatusError{
-		"update": kerrors.NewInvalid(api.Kind("Status"), "foo", nil),
+	verbsOnError := map[string]*apierrors.StatusError{
+		"patch": apierrors.NewInvalid(api.Kind("Status"), "foo", nil),
 	}
-	scaleClientExpectedAction := []string{"get", "update"}
+	scaleClientExpectedAction := []string{"patch"}
 	scaleClient := createFakeScaleClient("replicasets", "foo", 2, verbsOnError)
 	scaler := NewScaler(scaleClient)
-	preconditions := ScalePrecondition{-1, ""}
 	count := uint(3)
 	name := "foo"
 	namespace := "default"
 
-	scaleFunc := ScaleCondition(scaler, &preconditions, namespace, name, count, nil, schema.GroupResource{Group: "extensions", Resource: "replicasets"})
+	scaleFunc := ScaleCondition(scaler, nil, namespace, name, count, nil, rsgvr, false)
 	pass, err := scaleFunc()
 	if pass {
 		t.Errorf("Expected an update failure to return pass = false, got pass = %v", pass)
@@ -466,7 +479,7 @@ func TestReplicaSetsGetterFailsPreconditions(t *testing.T) {
 	preconditions := ScalePrecondition{2, ""}
 	count := uint(3)
 	name := "foo"
-	err := scaler.Scale("default", name, count, &preconditions, nil, nil, schema.GroupResource{Group: "extensions", Resource: "replicasets"})
+	err := scaler.Scale("default", name, count, &preconditions, nil, nil, rsgvr, false)
 	if err == nil {
 		t.Fatal("expected to get an error but non was returned")
 	}
@@ -484,33 +497,44 @@ func TestReplicaSetsGetterFailsPreconditions(t *testing.T) {
 // TestGenericScaleSimple exercises GenericScaler.ScaleSimple method
 func TestGenericScaleSimple(t *testing.T) {
 	// test data
-	scaleClient := createFakeScaleClient("deployments", "abc", 10, nil)
+	scaleClient := createFakeScaleClient("deployments", "abc", 5, nil)
+	// expected actions
+	scaleClientExpectedAction := []string{"patch", "get", "update", "get", "update", "get", "get", "update", "get"}
 
 	// test scenarios
 	scenarios := []struct {
 		name         string
-		precondition ScalePrecondition
+		precondition *ScalePrecondition
 		newSize      int
-		targetGR     schema.GroupResource
+		targetGVR    schema.GroupVersionResource
 		resName      string
 		scaleGetter  scale.ScalesGetter
 		expectError  bool
 	}{
+		// scenario 0: scale up the "abc" deployment without precondition
+		{
+			name:         "scale up the \"abc\" deployment without precondition",
+			precondition: nil,
+			newSize:      10,
+			targetGVR:    deploygvr,
+			resName:      "abc",
+			scaleGetter:  scaleClient,
+		},
 		// scenario 1: scale up the "abc" deployment
 		{
 			name:         "scale up the \"abc\" deployment",
-			precondition: ScalePrecondition{10, ""},
+			precondition: &ScalePrecondition{10, ""},
 			newSize:      20,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 		},
 		// scenario 2: scale down the "abc" deployment
 		{
 			name:         "scale down the \"abs\" deployment",
-			precondition: ScalePrecondition{20, ""},
+			precondition: &ScalePrecondition{20, ""},
 			newSize:      5,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 		},
@@ -518,9 +542,9 @@ func TestGenericScaleSimple(t *testing.T) {
 		// note that the previous scenario (2) set the size to 5
 		{
 			name:         "precondition error, expected size is 1",
-			precondition: ScalePrecondition{1, ""},
+			precondition: &ScalePrecondition{1, ""},
 			newSize:      5,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 			expectError:  true,
@@ -528,18 +552,18 @@ func TestGenericScaleSimple(t *testing.T) {
 		// scenario 4: precondition is not validated when the precondition size is set to -1
 		{
 			name:         "precondition is not validated when the size is set to -1",
-			precondition: ScalePrecondition{-1, ""},
+			precondition: &ScalePrecondition{-1, ""},
 			newSize:      5,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 		},
 		// scenario 5: precondition error, resource version mismatch
 		{
 			name:         "precondition error, resource version mismatch",
-			precondition: ScalePrecondition{5, "v1"},
+			precondition: &ScalePrecondition{5, "v1"},
 			newSize:      5,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 			expectError:  true,
@@ -551,7 +575,7 @@ func TestGenericScaleSimple(t *testing.T) {
 		t.Run(fmt.Sprintf("running scenario %d: %s", index+1, scenario.name), func(t *testing.T) {
 			target := NewScaler(scenario.scaleGetter)
 
-			resVersion, err := target.ScaleSimple("default", scenario.resName, &scenario.precondition, uint(scenario.newSize), scenario.targetGR)
+			resVersion, err := target.ScaleSimple("default", scenario.resName, scenario.precondition, uint(scenario.newSize), scenario.targetGVR, false)
 
 			if scenario.expectError && err == nil {
 				t.Fatal("expected an error but was not returned")
@@ -564,39 +588,61 @@ func TestGenericScaleSimple(t *testing.T) {
 			}
 		})
 	}
+
+	// check actions
+	actions := scaleClient.Actions()
+	if len(actions) != len(scaleClientExpectedAction) {
+		t.Errorf("unexpected actions: %v, expected %d actions got %d", actions, len(scaleClientExpectedAction), len(actions))
+	}
+	for i, verb := range scaleClientExpectedAction {
+		if actions[i].GetVerb() != verb {
+			t.Errorf("unexpected action: %+v, expected %s", actions[i].GetVerb(), verb)
+		}
+	}
 }
 
 // TestGenericScale exercises GenericScaler.Scale method
 func TestGenericScale(t *testing.T) {
 	// test data
-	scaleClient := createFakeScaleClient("deployments", "abc", 10, nil)
+	scaleClient := createFakeScaleClient("deployments", "abc", 5, nil)
+	// expected actions
+	scaleClientExpectedAction := []string{"patch", "get", "update", "get", "get"}
 
 	// test scenarios
 	scenarios := []struct {
 		name            string
-		precondition    ScalePrecondition
+		precondition    *ScalePrecondition
 		newSize         int
-		targetGR        schema.GroupResource
+		targetGVR       schema.GroupVersionResource
 		resName         string
 		scaleGetter     scale.ScalesGetter
 		waitForReplicas *RetryParams
 		expectError     bool
 	}{
+		// scenario 0: scale up the "abc" deployment without precondition
+		{
+			name:         "scale up the \"abc\" deployment without precondition",
+			precondition: nil,
+			newSize:      10,
+			targetGVR:    deploygvr,
+			resName:      "abc",
+			scaleGetter:  scaleClient,
+		},
 		// scenario 1: scale up the "abc" deployment
 		{
 			name:         "scale up the \"abc\" deployment",
-			precondition: ScalePrecondition{10, ""},
+			precondition: &ScalePrecondition{10, ""},
 			newSize:      20,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "abc",
 			scaleGetter:  scaleClient,
 		},
 		//scenario 2: a resource name cannot be empty
 		{
 			name:         "a resource name cannot be empty",
-			precondition: ScalePrecondition{10, ""},
+			precondition: &ScalePrecondition{10, ""},
 			newSize:      20,
-			targetGR:     schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:    deploygvr,
 			resName:      "",
 			scaleGetter:  scaleClient,
 			expectError:  true,
@@ -604,9 +650,9 @@ func TestGenericScale(t *testing.T) {
 		// scenario 3: wait for replicas error due to status.Replicas != spec.Replicas
 		{
 			name:            "wait for replicas error due to status.Replicas != spec.Replicas",
-			precondition:    ScalePrecondition{10, ""},
+			precondition:    &ScalePrecondition{10, ""},
 			newSize:         20,
-			targetGR:        schema.GroupResource{Group: "apps", Resource: "deployments"},
+			targetGVR:       deploygvr,
 			resName:         "abc",
 			scaleGetter:     scaleClient,
 			waitForReplicas: &RetryParams{time.Duration(5 * time.Second), time.Duration(5 * time.Second)},
@@ -619,7 +665,7 @@ func TestGenericScale(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			target := NewScaler(scenario.scaleGetter)
 
-			err := target.Scale("default", scenario.resName, uint(scenario.newSize), &scenario.precondition, nil, scenario.waitForReplicas, scenario.targetGR)
+			err := target.Scale("default", scenario.resName, uint(scenario.newSize), scenario.precondition, nil, scenario.waitForReplicas, scenario.targetGVR, false)
 
 			if scenario.expectError && err == nil {
 				t.Fatal("expected an error but was not returned")
@@ -629,14 +675,25 @@ func TestGenericScale(t *testing.T) {
 			}
 		})
 	}
+
+	// check actions
+	actions := scaleClient.Actions()
+	if len(actions) != len(scaleClientExpectedAction) {
+		t.Errorf("unexpected actions: %v, expected %d actions got %d", actions, len(scaleClientExpectedAction), len(actions))
+	}
+	for i, verb := range scaleClientExpectedAction {
+		if actions[i].GetVerb() != verb {
+			t.Errorf("unexpected action: %+v, expected %s", actions[i].GetVerb(), verb)
+		}
+	}
 }
 
-func createFakeScaleClient(resource string, resourceName string, replicas int, errorsOnVerb map[string]*kerrors.StatusError) *fakescale.FakeScaleClient {
-	shouldReturnAnError := func(verb string) (*kerrors.StatusError, bool) {
+func createFakeScaleClient(resource string, resourceName string, replicas int, errorsOnVerb map[string]*apierrors.StatusError) *fakescale.FakeScaleClient {
+	shouldReturnAnError := func(verb string) (*apierrors.StatusError, bool) {
 		if anError, anErrorExists := errorsOnVerb[verb]; anErrorExists {
 			return anError, true
 		}
-		return &kerrors.StatusError{}, false
+		return &apierrors.StatusError{}, false
 	}
 	newReplicas := int32(replicas)
 	scaleClient := &fakescale.FakeScaleClient{}
@@ -659,6 +716,7 @@ func createFakeScaleClient(resource string, resourceName string, replicas int, e
 		}
 		return true, obj, nil
 	})
+
 	scaleClient.AddReactor("update", resource, func(rawAction testcore.Action) (handled bool, ret runtime.Object, err error) {
 		action := rawAction.(testcore.UpdateAction)
 		obj := action.GetObject().(*autoscalingv1.Scale)
@@ -672,6 +730,36 @@ func createFakeScaleClient(resource string, resourceName string, replicas int, e
 		return true, &autoscalingv1.Scale{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      obj.Name,
+				Namespace: action.GetNamespace(),
+			},
+			Spec: autoscalingv1.ScaleSpec{
+				Replicas: newReplicas,
+			},
+		}, nil
+	})
+
+	scaleClient.AddReactor("patch", resource, func(rawAction testcore.Action) (handled bool, ret runtime.Object, err error) {
+		action := rawAction.(testcore.PatchAction)
+		pt := action.GetPatchType()
+		if pt != types.MergePatchType {
+			return true, nil, fmt.Errorf("unexpected patch type: expected = %s, got = %s", types.MergePatchType, pt)
+		}
+		var scale autoscalingv1.Scale
+		err = json.Unmarshal(action.GetPatch(), &scale)
+		if err != nil {
+			return true, nil, fmt.Errorf("invalid patch: %s", err)
+		}
+		name := action.GetName()
+		if name != resourceName {
+			return true, nil, fmt.Errorf("expected = %s, got = %s", resourceName, name)
+		}
+		if anError, should := shouldReturnAnError("patch"); should {
+			return true, nil, anError
+		}
+		newReplicas = scale.Spec.Replicas
+		return true, &autoscalingv1.Scale{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
 				Namespace: action.GetNamespace(),
 			},
 			Spec: autoscalingv1.ScaleSpec{

@@ -33,17 +33,17 @@ import (
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cloudprovider "k8s.io/cloud-provider"
+	cloudproviderapi "k8s.io/cloud-provider/api"
+	"k8s.io/component-base/version"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
-	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
-	"k8s.io/kubernetes/pkg/version"
 	"k8s.io/kubernetes/pkg/volume"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -57,7 +57,7 @@ const (
 type Setter func(node *v1.Node) error
 
 // NodeAddress returns a Setter that updates address-related information on the node.
-func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
+func NodeAddress(nodeIPs []net.IP, // typically Kubelet.nodeIPs
 	validateNodeIPFunc func(net.IP) error, // typically Kubelet.nodeIPValidator
 	hostname string, // typically Kubelet.hostname
 	hostnameOverridden bool, // was the hostname force set?
@@ -65,20 +65,39 @@ func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
 	cloud cloudprovider.Interface, // typically Kubelet.cloud
 	nodeAddressesFunc func() ([]v1.NodeAddress, error), // typically Kubelet.cloudResourceSyncManager.NodeAddresses
 ) Setter {
+	var nodeIP, secondaryNodeIP net.IP
+	if len(nodeIPs) > 0 {
+		nodeIP = nodeIPs[0]
+	}
+	preferIPv4 := nodeIP == nil || nodeIP.To4() != nil
+	isPreferredIPFamily := func(ip net.IP) bool { return (ip.To4() != nil) == preferIPv4 }
+	nodeIPSpecified := nodeIP != nil && !nodeIP.IsUnspecified()
+
+	if len(nodeIPs) > 1 {
+		secondaryNodeIP = nodeIPs[1]
+	}
+	secondaryNodeIPSpecified := secondaryNodeIP != nil && !secondaryNodeIP.IsUnspecified()
+
 	return func(node *v1.Node) error {
-		if nodeIP != nil {
+		if nodeIPSpecified {
 			if err := validateNodeIPFunc(nodeIP); err != nil {
 				return fmt.Errorf("failed to validate nodeIP: %v", err)
 			}
 			klog.V(2).Infof("Using node IP: %q", nodeIP.String())
 		}
+		if secondaryNodeIPSpecified {
+			if err := validateNodeIPFunc(secondaryNodeIP); err != nil {
+				return fmt.Errorf("failed to validate secondaryNodeIP: %v", err)
+			}
+			klog.V(2).Infof("Using secondary node IP: %q", secondaryNodeIP.String())
+		}
 
 		if externalCloudProvider {
-			if nodeIP != nil {
+			if nodeIPSpecified {
 				if node.ObjectMeta.Annotations == nil {
 					node.ObjectMeta.Annotations = make(map[string]string)
 				}
-				node.ObjectMeta.Annotations[kubeletapis.AnnotationProvidedIPAddr] = nodeIP.String()
+				node.ObjectMeta.Annotations[cloudproviderapi.AnnotationAlphaProvidedIPAddr] = nodeIP.String()
 			}
 
 			// If --cloud-provider=external and node address is already set,
@@ -101,7 +120,7 @@ func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
 			// that address Type (like InternalIP and ExternalIP), meaning other addresses of the same Type are discarded.
 			// See #61921 for more information: some cloud providers may supply secondary IPs, so nodeIP serves as a way to
 			// ensure that the correct IPs show up on a Node object.
-			if nodeIP != nil {
+			if nodeIPSpecified {
 				enforcedNodeAddresses := []v1.NodeAddress{}
 
 				nodeIPTypes := make(map[v1.NodeAddressType]bool)
@@ -125,6 +144,23 @@ func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
 				}
 
 				nodeAddresses = enforcedNodeAddresses
+			} else if nodeIP != nil {
+				// nodeIP is "0.0.0.0" or "::"; sort cloudNodeAddresses to
+				// prefer addresses of the matching family
+				sortedAddresses := make([]v1.NodeAddress, 0, len(cloudNodeAddresses))
+				for _, nodeAddress := range cloudNodeAddresses {
+					ip := net.ParseIP(nodeAddress.Address)
+					if ip == nil || isPreferredIPFamily(ip) {
+						sortedAddresses = append(sortedAddresses, nodeAddress)
+					}
+				}
+				for _, nodeAddress := range cloudNodeAddresses {
+					ip := net.ParseIP(nodeAddress.Address)
+					if ip != nil && !isPreferredIPFamily(ip) {
+						sortedAddresses = append(sortedAddresses, nodeAddress)
+					}
+				}
+				nodeAddresses = sortedAddresses
 			} else {
 				// If nodeIP is unset, just use the addresses provided by the cloud provider as-is
 				nodeAddresses = cloudNodeAddresses
@@ -164,16 +200,24 @@ func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
 				}
 			}
 			node.Status.Addresses = nodeAddresses
+		} else if nodeIPSpecified && secondaryNodeIPSpecified {
+			node.Status.Addresses = []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: nodeIP.String()},
+				{Type: v1.NodeInternalIP, Address: secondaryNodeIP.String()},
+				{Type: v1.NodeHostName, Address: hostname},
+			}
 		} else {
 			var ipAddr net.IP
 			var err error
 
-			// 1) Use nodeIP if set
+			// 1) Use nodeIP if set (and not "0.0.0.0"/"::")
 			// 2) If the user has specified an IP to HostnameOverride, use it
-			// 3) Lookup the IP from node name by DNS and use the first valid IPv4 address.
-			//    If the node does not have a valid IPv4 address, use the first valid IPv6 address.
+			// 3) Lookup the IP from node name by DNS
 			// 4) Try to get the IP from the network interface used as default gateway
-			if nodeIP != nil {
+			//
+			// For steps 3 and 4, IPv4 addresses are preferred to IPv6 addresses
+			// unless nodeIP is "::", in which case it is reversed.
+			if nodeIPSpecified {
 				ipAddr = nodeIP
 			} else if addr := net.ParseIP(hostname); addr != nil {
 				ipAddr = addr
@@ -182,18 +226,17 @@ func NodeAddress(nodeIP net.IP, // typically Kubelet.nodeIP
 				addrs, _ = net.LookupIP(node.Name)
 				for _, addr := range addrs {
 					if err = validateNodeIPFunc(addr); err == nil {
-						if addr.To4() != nil {
+						if isPreferredIPFamily(addr) {
 							ipAddr = addr
 							break
-						}
-						if addr.To16() != nil && ipAddr == nil {
+						} else if ipAddr == nil {
 							ipAddr = addr
 						}
 					}
 				}
 
 				if ipAddr == nil {
-					ipAddr, err = utilnet.ChooseHostInterface()
+					ipAddr, err = utilnet.ResolveBindAddress(nodeIP)
 				}
 			}
 
@@ -295,13 +338,11 @@ func MachineInfo(nodeName string,
 			}
 
 			devicePluginCapacity, devicePluginAllocatable, removedDevicePlugins = devicePluginResourceCapacityFunc()
-			if devicePluginCapacity != nil {
-				for k, v := range devicePluginCapacity {
-					if old, ok := node.Status.Capacity[k]; !ok || old.Value() != v.Value() {
-						klog.V(2).Infof("Update capacity for %s to %d", k, v.Value())
-					}
-					node.Status.Capacity[k] = v
+			for k, v := range devicePluginCapacity {
+				if old, ok := node.Status.Capacity[k]; !ok || old.Value() != v.Value() {
+					klog.V(2).Infof("Update capacity for %s to %d", k, v.Value())
 				}
+				node.Status.Capacity[k] = v
 			}
 
 			for _, removedResource := range removedDevicePlugins {
@@ -343,13 +384,11 @@ func MachineInfo(nodeName string,
 			node.Status.Allocatable[k] = value
 		}
 
-		if devicePluginAllocatable != nil {
-			for k, v := range devicePluginAllocatable {
-				if old, ok := node.Status.Allocatable[k]; !ok || old.Value() != v.Value() {
-					klog.V(2).Infof("Update allocatable for %s to %d", k, v.Value())
-				}
-				node.Status.Allocatable[k] = v
+		for k, v := range devicePluginAllocatable {
+			if old, ok := node.Status.Allocatable[k]; !ok || old.Value() != v.Value() {
+				klog.V(2).Infof("Update allocatable for %s to %d", k, v.Value())
 			}
+			node.Status.Allocatable[k] = v
 		}
 		// for every huge page reservation, we need to remove it from allocatable memory
 		for k, v := range node.Status.Capacity {
@@ -376,8 +415,6 @@ func VersionInfo(versionInfoFunc func() (*cadvisorapiv1.VersionInfo, error), // 
 	return func(node *v1.Node) error {
 		verinfo, err := versionInfoFunc()
 		if err != nil {
-			// TODO(mtaufen): consider removing this log line, since returned error will be logged
-			klog.Errorf("Error getting version info: %v", err)
 			return fmt.Errorf("error getting version info: %v", err)
 		}
 
@@ -416,8 +453,6 @@ func Images(nodeStatusMaxImages int32,
 		var imagesOnNode []v1.ContainerImage
 		containerImages, err := imageListFunc()
 		if err != nil {
-			// TODO(mtaufen): consider removing this log line, since returned error will be logged
-			klog.Errorf("Error getting image list: %v", err)
 			node.Status.Images = imagesOnNode
 			return fmt.Errorf("error getting image list: %v", err)
 		}
@@ -428,7 +463,9 @@ func Images(nodeStatusMaxImages int32,
 		}
 
 		for _, image := range containerImages {
-			names := append(image.RepoDigests, image.RepoTags...)
+			// make a copy to avoid modifying slice members of the image items in the list
+			names := append([]string{}, image.RepoDigests...)
+			names = append(names, image.RepoTags...)
 			// Report up to MaxNamesPerImageInNodeStatus names per image.
 			if len(names) > MaxNamesPerImageInNodeStatus {
 				names = names[0:MaxNamesPerImageInNodeStatus]

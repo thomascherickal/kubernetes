@@ -23,11 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
 	"net"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -47,8 +49,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	cloudprovider "k8s.io/cloud-provider"
 	nodehelpers "k8s.io/cloud-provider/node/helpers"
+	volerr "k8s.io/cloud-provider/volume/errors"
 	volumehelpers "k8s.io/cloud-provider/volume/helpers"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/legacy-cloud-providers/vsphere/vclib"
 	"k8s.io/legacy-cloud-providers/vsphere/vclib/diskmanagers"
@@ -94,10 +97,12 @@ type VSphere struct {
 	hostName string
 	// Maps the VSphere IP address to VSphereInstance
 	vsphereInstanceMap map[string]*VSphereInstance
+	vsphereVolumeMap   *VsphereVolumeMap
 	// Responsible for managing discovery of k8s node, their location etc.
 	nodeManager          *NodeManager
 	vmUUID               string
 	isSecretInfoProvided bool
+	isSecretManaged      bool
 }
 
 // Represents a vSphere instance where one or more kubernetes nodes are running.
@@ -111,7 +116,7 @@ type VirtualCenterConfig struct {
 	// vCenter username.
 	User string `gcfg:"user"`
 	// vCenter password in clear text.
-	Password string `gcfg:"password"`
+	Password string `gcfg:"password" datapolicy:"password"`
 	// vCenter port.
 	VCenterPort string `gcfg:"port"`
 	// Datacenter in which VMs are located.
@@ -135,7 +140,7 @@ type VSphereConfig struct {
 		// vCenter username.
 		User string `gcfg:"user"`
 		// vCenter password in clear text.
-		Password string `gcfg:"password"`
+		Password string `gcfg:"password" datapolicy:"password"`
 		// Deprecated. Use VirtualCenter to specify multiple vCenter Servers.
 		// vCenter IP.
 		VCenterIP string `gcfg:"server"`
@@ -175,6 +180,8 @@ type VSphereConfig struct {
 		SecretName string `gcfg:"secret-name"`
 		// Secret Namespace where secret will be present that has vCenter credentials.
 		SecretNamespace string `gcfg:"secret-namespace"`
+		// Secret changes being ingnored for cloud resources
+		SecretNotManaged bool `gcfg:"secret-not-managed"`
 	}
 
 	VirtualCenter map[string]*VirtualCenterConfig
@@ -217,7 +224,7 @@ type Volumes interface {
 
 	// DiskIsAttached checks if a disk is attached to the given node.
 	// Assumption: If node doesn't exist, disk is not attached to the node.
-	DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (bool, error)
+	DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (bool, string, error)
 
 	// DisksAreAttached checks if a list disks are attached to the given node.
 	// Assumption: If node doesn't exist, disks are not attached to the node.
@@ -275,6 +282,15 @@ func (vs *VSphere) SetInformers(informerFactory informers.SharedInformerFactory)
 			Cache: &SecretCache{
 				VirtualCenter: make(map[string]*Credential),
 			},
+		}
+		if vs.isSecretManaged {
+			klog.V(4).Infof("Setting up secret informers for vSphere Cloud Provider")
+			secretInformer := informerFactory.Core().V1().Secrets().Informer()
+			secretInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+				AddFunc:    vs.SecretAdded,
+				UpdateFunc: vs.SecretUpdated,
+			})
+			klog.V(4).Infof("Secret informers in vSphere cloud provider initialized")
 		}
 		vs.nodeManager.UpdateCredentialManager(secretCredentialManager)
 	}
@@ -529,7 +545,9 @@ func buildVSphereFromConfig(cfg VSphereConfig) (*VSphere, error) {
 			nodeInfoMap:        make(map[string]*NodeInfo),
 			registeredNodes:    make(map[string]*v1.Node),
 		},
+		vsphereVolumeMap:     NewVsphereVolumeMap(),
 		isSecretInfoProvided: isSecretInfoProvided,
+		isSecretManaged:      !cfg.Global.SecretNotManaged,
 		cfg:                  &cfg,
 	}
 	return &vs, nil
@@ -544,6 +562,12 @@ func logout(vs *VSphere) {
 // Instances returns an implementation of Instances for vSphere.
 func (vs *VSphere) Instances() (cloudprovider.Instances, bool) {
 	return vs, true
+}
+
+// InstancesV2 returns an implementation of InstancesV2 for vSphere.
+// TODO: implement ONLY for external cloud provider
+func (vs *VSphere) InstancesV2() (cloudprovider.InstancesV2, bool) {
+	return nil, false
 }
 
 func getLocalIP() ([]v1.NodeAddress, error) {
@@ -572,7 +596,7 @@ func getLocalIP() ([]v1.NodeAddress, error) {
 		} else {
 			for _, addr := range localAddrs {
 				if ipnet, ok := addr.(*net.IPNet); ok {
-					if ipnet.IP.To4() != nil {
+					if !ipnet.IP.IsLinkLocalUnicast() {
 						// Filter external IP by MAC address OUIs from vCenter and from ESX
 						vmMACAddr := strings.ToLower(i.HardwareAddr.String())
 						// Making sure that the MAC address is long enough
@@ -639,17 +663,25 @@ func (vs *VSphere) getVMFromNodeName(ctx context.Context, nodeName k8stypes.Node
 
 // NodeAddresses is an implementation of Instances.NodeAddresses.
 func (vs *VSphere) NodeAddresses(ctx context.Context, nodeName k8stypes.NodeName) ([]v1.NodeAddress, error) {
-	// Get local IP addresses if node is local node
 	if vs.hostName == convertToString(nodeName) {
-		addrs, err := getLocalIP()
-		if err != nil {
-			return nil, err
-		}
-		// add the hostname address
-		nodehelpers.AddToNodeAddresses(&addrs, v1.NodeAddress{Type: v1.NodeHostName, Address: vs.hostName})
-		return addrs, nil
+		return vs.getNodeAddressesFromLocalIP()
 	}
+	return vs.getNodeAddressesFromVM(ctx, nodeName)
+}
 
+// getNodeAddressesFromLocalIP get local IP addresses if node is local node.
+func (vs *VSphere) getNodeAddressesFromLocalIP() ([]v1.NodeAddress, error) {
+	addrs, err := getLocalIP()
+	if err != nil {
+		return nil, err
+	}
+	// add the hostname address
+	nodehelpers.AddToNodeAddresses(&addrs, v1.NodeAddress{Type: v1.NodeHostName, Address: vs.hostName})
+	return addrs, nil
+}
+
+// getNodeAddressesFromVM get vm IP addresses if node is vm.
+func (vs *VSphere) getNodeAddressesFromVM(ctx context.Context, nodeName k8stypes.NodeName) ([]v1.NodeAddress, error) {
 	if vs.cfg == nil {
 		return nil, cloudprovider.InstanceNotFound
 	}
@@ -657,7 +689,7 @@ func (vs *VSphere) NodeAddresses(ctx context.Context, nodeName k8stypes.NodeName
 	// Below logic can be executed only on master as VC details are present.
 	addrs := []v1.NodeAddress{}
 	// Create context
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	vsi, err := vs.getVSphereInstance(nodeName)
 	if err != nil {
@@ -683,7 +715,7 @@ func (vs *VSphere) NodeAddresses(ctx context.Context, nodeName k8stypes.NodeName
 	for _, v := range vmMoList[0].Guest.Net {
 		if vs.cfg.Network.PublicNetwork == v.Network {
 			for _, ip := range v.IpAddress {
-				if net.ParseIP(ip).To4() != nil {
+				if !net.ParseIP(ip).IsLinkLocalUnicast() {
 					nodehelpers.AddToNodeAddresses(&addrs,
 						v1.NodeAddress{
 							Type:    v1.NodeExternalIP,
@@ -896,6 +928,13 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, storagePolicyName string, nodeN
 			return "", err
 		}
 
+		// try and get canonical path for disk and if we can't throw error
+		vmDiskPath, err = getcanonicalVolumePath(ctx, vm.Datacenter, vmDiskPath)
+		if err != nil {
+			klog.Errorf("failed to get canonical path for %s on node %s: %v", vmDiskPath, convertToString(nodeName), err)
+			return "", err
+		}
+
 		diskUUID, err = vm.AttachDisk(ctx, vmDiskPath, &vclib.VolumeOptions{SCSIControllerType: vclib.PVSCSIControllerType, StoragePolicyName: storagePolicyName})
 		if err != nil {
 			klog.Errorf("Failed to attach disk: %s for node: %s. err: +%v", vmDiskPath, convertToString(nodeName), err)
@@ -916,6 +955,20 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, storagePolicyName string, nodeN
 		}
 	}
 	klog.V(4).Infof("AttachDisk executed for node %s and volume %s with diskUUID %s. Err: %s", convertToString(nodeName), vmDiskPath, diskUUID, err)
+	if err != nil {
+		// if attach failed, we should check if disk is attached somewhere else. This can happen for several reasons
+		// and throwing a dangling volume error here will allow attach-detach controller to detach disk from a node
+		// where it is not needed.
+		existingNode, ok := vs.vsphereVolumeMap.CheckForVolume(vmDiskPath)
+		if ok {
+			attached, newVolumePath, diskAttachedError := vs.DiskIsAttached(vmDiskPath, existingNode)
+			// if disk is attached somewhere else then we can throw a dangling error
+			if diskAttachedError == nil && attached && (nodeName != existingNode) {
+				klog.V(3).Infof("found dangling volume %s to node %s", vmDiskPath, existingNode)
+				return "", volerr.NewDanglingError(err.Error(), existingNode, newVolumePath)
+			}
+		}
+	}
 	vclib.RecordvSphereMetric(vclib.OperationAttachVolume, requestTime, err)
 	return diskUUID, err
 }
@@ -976,8 +1029,8 @@ func (vs *VSphere) DetachDisk(volPath string, nodeName k8stypes.NodeName) error 
 }
 
 // DiskIsAttached returns if disk is attached to the VM using controllers supported by the plugin.
-func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (bool, error) {
-	diskIsAttachedInternal := func(volPath string, nodeName k8stypes.NodeName) (bool, error) {
+func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (bool, string, error) {
+	diskIsAttachedInternal := func(volPath string, nodeName k8stypes.NodeName) (bool, string, error) {
 		var vSphereInstance string
 		if nodeName == "" {
 			vSphereInstance = vs.hostName
@@ -990,25 +1043,30 @@ func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (b
 		defer cancel()
 		vsi, err := vs.getVSphereInstance(nodeName)
 		if err != nil {
-			return false, err
+			return false, volPath, err
 		}
 		// Ensure client is logged in and session is valid
 		err = vs.nodeManager.vcConnect(ctx, vsi)
 		if err != nil {
-			return false, err
+			return false, volPath, err
 		}
 		vm, err := vs.getVMFromNodeName(ctx, nodeName)
 		if err != nil {
 			if err == vclib.ErrNoVMFound {
 				klog.Warningf("Node %q does not exist, vsphere CP will assume disk %v is not attached to it.", nodeName, volPath)
 				// make the disk as detached and return false without error.
-				return false, nil
+				return false, volPath, nil
 			}
 			klog.Errorf("Failed to get VM object for node: %q. err: +%v", vSphereInstance, err)
-			return false, err
+			return false, volPath, err
 		}
 
 		volPath = vclib.RemoveStorageClusterORFolderNameFromVDiskPath(volPath)
+		canonicalPath, pathFetchErr := getcanonicalVolumePath(ctx, vm.Datacenter, volPath)
+		// if canonicalPath is not empty string and pathFetchErr is nil then we can use canonical path to perform detach
+		if canonicalPath != "" && pathFetchErr == nil {
+			volPath = canonicalPath
+		}
 		attached, err := vm.IsDiskAttached(ctx, volPath)
 		if err != nil {
 			klog.Errorf("DiskIsAttached failed to determine whether disk %q is still attached on node %q",
@@ -1016,22 +1074,22 @@ func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (b
 				vSphereInstance)
 		}
 		klog.V(4).Infof("DiskIsAttached result: %v and error: %q, for volume: %q", attached, err, volPath)
-		return attached, err
+		return attached, volPath, err
 	}
 	requestTime := time.Now()
-	isAttached, err := diskIsAttachedInternal(volPath, nodeName)
+	isAttached, newVolumePath, err := diskIsAttachedInternal(volPath, nodeName)
 	if err != nil {
 		if vclib.IsManagedObjectNotFoundError(err) {
 			err = vs.nodeManager.RediscoverNode(nodeName)
 			if err == vclib.ErrNoVMFound {
 				isAttached, err = false, nil
 			} else if err == nil {
-				isAttached, err = diskIsAttachedInternal(volPath, nodeName)
+				isAttached, newVolumePath, err = diskIsAttachedInternal(volPath, nodeName)
 			}
 		}
 	}
 	vclib.RecordvSphereMetric(vclib.OperationDiskIsAttached, requestTime, err)
-	return isAttached, err
+	return isAttached, newVolumePath, err
 }
 
 // DisksAreAttached returns if disks are attached to the VM using controllers supported by the plugin.
@@ -1044,6 +1102,7 @@ func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (b
 // 5b. If VMs are removed from vSphere inventory they are ignored.
 func (vs *VSphere) DisksAreAttached(nodeVolumes map[k8stypes.NodeName][]string) (map[k8stypes.NodeName]map[string]bool, error) {
 	disksAreAttachedInternal := func(nodeVolumes map[k8stypes.NodeName][]string) (map[k8stypes.NodeName]map[string]bool, error) {
+		vs.vsphereVolumeMap.StartDiskVerification()
 
 		// disksAreAttach checks whether disks are attached to the nodes.
 		// Returns nodes that need to be retried if retry is true
@@ -1071,11 +1130,11 @@ func (vs *VSphere) DisksAreAttached(nodeVolumes map[k8stypes.NodeName][]string) 
 				dcNodes[VC_DC] = append(dcNodes[VC_DC], nodeName)
 			}
 
-			for _, nodes := range dcNodes {
+			for _, nodeNames := range dcNodes {
 				localAttachedMap := make(map[string]map[string]bool)
 				localAttachedMaps = append(localAttachedMaps, localAttachedMap)
 				// Start go routines per VC-DC to check disks are attached
-				go func() {
+				go func(nodes []k8stypes.NodeName) {
 					nodesToRetryLocal, err := vs.checkDiskAttached(ctx, nodes, nodeVolumes, localAttachedMap, retry)
 					if err != nil {
 						if !vclib.IsManagedObjectNotFoundError(err) {
@@ -1089,7 +1148,7 @@ func (vs *VSphere) DisksAreAttached(nodeVolumes map[k8stypes.NodeName][]string) 
 					nodesToRetry = append(nodesToRetry, nodesToRetryLocal...)
 					nodesToRetryMutex.Unlock()
 					wg.Done()
-				}()
+				}(nodeNames)
 				wg.Add(1)
 			}
 			wg.Wait()
@@ -1155,7 +1214,10 @@ func (vs *VSphere) DisksAreAttached(nodeVolumes map[k8stypes.NodeName][]string) 
 			for nodeName, volPaths := range attached {
 				disksAttached[convertToK8sType(nodeName)] = volPaths
 			}
+
 		}
+		// any volume which we could not verify will be removed from the map.
+		vs.vsphereVolumeMap.RemoveUnverified()
 		klog.V(4).Infof("DisksAreAttach successfully executed. result: %+v", attached)
 		return disksAttached, nil
 	}
@@ -1459,6 +1521,54 @@ func (vs *VSphere) NodeDeleted(obj interface{}) {
 	}
 }
 
+// Notification handler when credentials secret is added.
+func (vs *VSphere) SecretAdded(obj interface{}) {
+	secret, ok := obj.(*v1.Secret)
+	if secret == nil || !ok {
+		klog.Warningf("Unrecognized secret object %T", obj)
+		return
+	}
+
+	if secret.Name != vs.cfg.Global.SecretName ||
+		secret.Namespace != vs.cfg.Global.SecretNamespace {
+		return
+	}
+
+	klog.V(4).Infof("refreshing node cache for secret: %s/%s", secret.Namespace, secret.Name)
+	vs.refreshNodesForSecretChange()
+}
+
+// Notification handler when credentials secret is updated.
+func (vs *VSphere) SecretUpdated(obj interface{}, newObj interface{}) {
+	oldSecret, ok := obj.(*v1.Secret)
+	if oldSecret == nil || !ok {
+		klog.Warningf("Unrecognized secret object %T", obj)
+		return
+	}
+
+	secret, ok := newObj.(*v1.Secret)
+	if secret == nil || !ok {
+		klog.Warningf("Unrecognized secret object %T", newObj)
+		return
+	}
+
+	if secret.Name != vs.cfg.Global.SecretName ||
+		secret.Namespace != vs.cfg.Global.SecretNamespace ||
+		reflect.DeepEqual(secret.Data, oldSecret.Data) {
+		return
+	}
+
+	klog.V(4).Infof("refreshing node cache for secret: %s/%s", secret.Namespace, secret.Name)
+	vs.refreshNodesForSecretChange()
+}
+
+func (vs *VSphere) refreshNodesForSecretChange() {
+	err := vs.nodeManager.refreshNodes()
+	if err != nil {
+		klog.Errorf("failed to rediscover nodes: %v", err)
+	}
+}
+
 func (vs *VSphere) NodeManager() (nodeManager *NodeManager) {
 	if vs == nil {
 		return nil
@@ -1640,11 +1750,15 @@ func (vs *VSphere) GetVolumeLabels(volumePath string) (map[string]string, error)
 		return nil, err
 	}
 	dsZones, err = vs.collapseZonesInRegion(ctx, dsZones)
+	if err != nil {
+		klog.Errorf("Failed to collapse zones. %v", err)
+		return nil, err
+	}
 	// FIXME: For now, pick the first zone of datastore as the zone of volume
 	labels := make(map[string]string)
 	if len(dsZones) > 0 {
-		labels[v1.LabelZoneRegion] = dsZones[0].Region
-		labels[v1.LabelZoneFailureDomain] = dsZones[0].FailureDomain
+		labels[v1.LabelFailureDomainBetaRegion] = dsZones[0].Region
+		labels[v1.LabelFailureDomainBetaZone] = dsZones[0].FailureDomain
 	}
 	return labels, nil
 }

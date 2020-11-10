@@ -29,19 +29,20 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 # source "${KUBE_ROOT}/hack/lib/test.sh"
 source "${KUBE_ROOT}/test/cmd/apply.sh"
 source "${KUBE_ROOT}/test/cmd/apps.sh"
+source "${KUBE_ROOT}/test/cmd/authentication.sh"
 source "${KUBE_ROOT}/test/cmd/authorization.sh"
 source "${KUBE_ROOT}/test/cmd/batch.sh"
 source "${KUBE_ROOT}/test/cmd/certificate.sh"
 source "${KUBE_ROOT}/test/cmd/core.sh"
 source "${KUBE_ROOT}/test/cmd/crd.sh"
 source "${KUBE_ROOT}/test/cmd/create.sh"
+source "${KUBE_ROOT}/test/cmd/debug.sh"
 source "${KUBE_ROOT}/test/cmd/delete.sh"
 source "${KUBE_ROOT}/test/cmd/diff.sh"
 source "${KUBE_ROOT}/test/cmd/discovery.sh"
 source "${KUBE_ROOT}/test/cmd/exec.sh"
 source "${KUBE_ROOT}/test/cmd/generic-resources.sh"
 source "${KUBE_ROOT}/test/cmd/get.sh"
-source "${KUBE_ROOT}/test/cmd/kubeadm.sh"
 source "${KUBE_ROOT}/test/cmd/kubeconfig.sh"
 source "${KUBE_ROOT}/test/cmd/node-management.sh"
 source "${KUBE_ROOT}/test/cmd/plugins.sh"
@@ -58,11 +59,10 @@ source "${KUBE_ROOT}/test/cmd/wait.sh"
 
 ETCD_HOST=${ETCD_HOST:-127.0.0.1}
 ETCD_PORT=${ETCD_PORT:-2379}
-API_PORT=${API_PORT:-8080}
 SECURE_API_PORT=${SECURE_API_PORT:-6443}
 API_HOST=${API_HOST:-127.0.0.1}
 KUBELET_HEALTHZ_PORT=${KUBELET_HEALTHZ_PORT:-10248}
-CTLRMGR_PORT=${CTLRMGR_PORT:-10252}
+SECURE_CTLRMGR_PORT=${SECURE_CTLRMGR_PORT:-10257}
 PROXY_HOST=127.0.0.1 # kubectl only serves on localhost.
 
 IMAGE_NGINX="k8s.gcr.io/nginx:1.7.9"
@@ -128,15 +128,39 @@ function record_command() {
     local output="${KUBE_JUNIT_REPORT_DIR:-/tmp/junit-results}"
     echo "Recording: ${name}"
     echo "Running command: $*"
-    if ! juLog -output="${output}" -class="test-cmd" -name="${name}" "$@"
-    then
-      echo "Error when running ${name}"
+    juLog -output="${output}" -class="test-cmd" -name="${name}" "$@"
+    local exitCode=$?
+    if [[ ${exitCode} -ne 0 ]]; then
+      # Record failures for any non-canary commands
+      if [ "${name}" != "record_command_canary" ]; then
+        echo "Error when running ${name}"
+        foundError="${foundError}""${name}"", "
+      fi
+    elif [ "${name}" == "record_command_canary" ]; then
+      # If the canary command passed, fail
+      echo "record_command_canary succeeded unexpectedly"
       foundError="${foundError}""${name}"", "
     fi
 
     set -o nounset
     set -o errexit
 }
+
+# Ensure our record_command stack correctly propagates and detects errexit failures in invoked commands - see https://issue.k8s.io/84871
+foundError=""
+function record_command_canary()
+{
+  set -o nounset
+  set -o errexit
+  bogus-expected-to-fail
+  set +o nounset
+  set +o errexit
+}
+KUBE_JUNIT_REPORT_DIR=$(mktemp -d /tmp/record_command_canary.XXXXX) record_command record_command_canary
+if [[ -n "${foundError}" ]]; then
+  echo "FAILED TESTS: record_command_canary"
+  exit 1
+fi
 
 # Stops the running kubectl proxy, if there is one.
 function stop-proxy()
@@ -282,10 +306,12 @@ setup() {
 
   # TODO: we need to note down the current default namespace and set back to this
   # namespace after the tests are done.
-  kubectl config view
   CONTEXT="test"
-  kubectl config set-context "${CONTEXT}"
+  kubectl config set-credentials test-admin --token admin-token
+  kubectl config set-cluster local --insecure-skip-tls-verify --server "https://127.0.0.1:${SECURE_API_PORT}"
+  kubectl config set-context "${CONTEXT}" --user test-admin --cluster local
   kubectl config use-context "${CONTEXT}"
+  kubectl config view
 
   kube::log::status "Setup complete"
 }
@@ -314,14 +340,12 @@ runTests() {
     kubectl config set-context "${CONTEXT}" --namespace="${ns_name}"
   }
 
-  kube_flags=(
-    '-s' "http://127.0.0.1:${API_PORT}"
-  )
+  kube_flags=( '-s' "https://127.0.0.1:${SECURE_API_PORT}" '--insecure-skip-tls-verify' )
+
+  kube_flags_without_token=( "${kube_flags[@]}" )
 
   # token defined in hack/testdata/auth-tokens.csv
-  kube_flags_with_token=(
-    '-s' "https://127.0.0.1:${SECURE_API_PORT}" '--token=admin-token' '--insecure-skip-tls-verify=true'
-  )
+  kube_flags_with_token=( "${kube_flags_without_token[@]}" '--token=admin-token' )
 
   if [[ -z "${ALLOW_SKEW:-}" ]]; then
     kube_flags+=('--match-server-version')
@@ -392,7 +416,7 @@ runTests() {
     fi
   }
 
-   if [[ -n "${WHAT-}" ]]; then
+  if [[ -n "${WHAT-}" ]]; then
     for pkg in ${WHAT}
     do
       # running of kubeadm is captured in hack/make-targets/test-cmd.sh
@@ -415,6 +439,18 @@ runTests() {
   #######################
 
   record_command run_kubectl_config_set_tests
+
+  ##############################
+  # kubectl config set-cluster #
+  ##############################
+
+  record_command run_kubectl_config_set_cluster_tests
+
+  ##################################
+  # kubectl config set-credentials #
+  ##################################
+
+  record_command run_kubectl_config_set_credentials_tests
 
   #######################
   # kubectl local proxy #
@@ -481,6 +517,7 @@ runTests() {
 
   if kube::test::if_supports_resource "${pods}" ; then
     record_command run_kubectl_apply_tests
+    record_command run_kubectl_server_side_apply_tests
     record_command run_kubectl_run_tests
     record_command run_kubectl_create_filter_tests
   fi
@@ -547,15 +584,6 @@ runTests() {
   if kube::test::if_supports_resource "${customresourcedefinitions}" ; then
     record_command run_crd_tests
   fi
-
-  #################
-  # Run cmd w img #
-  #################
-
-  if kube::test::if_supports_resource "${deployments}" ; then
-    record_command run_cmd_with_img_tests
-  fi
-
 
   #####################################
   # Recursive Resources via directory #
@@ -733,6 +761,11 @@ runTests() {
     record_command run_nodes_tests
   fi
 
+  ########################
+  # Authentication
+  ########################
+
+  record_command run_exec_credentials_tests
 
   ########################
   # authorization.k8s.io #
@@ -793,6 +826,14 @@ runTests() {
 
   # kubectl auth reconcile
   if kube::test::if_supports_resource "${clusterroles}" ; then
+    # dry-run command
+    kubectl auth reconcile --dry-run=client "${kube_flags[@]}" -f test/fixtures/pkg/kubectl/cmd/auth/rbac-resource-plus.yaml
+    kube::test::get_object_assert 'rolebindings -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'roles -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'clusterrolebindings -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'clusterroles -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+
+    # command
     kubectl auth reconcile "${kube_flags[@]}" -f test/fixtures/pkg/kubectl/cmd/auth/rbac-resource-plus.yaml
     kube::test::get_object_assert 'rolebindings -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" 'testing-RB:'
     kube::test::get_object_assert 'roles -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" 'testing-R:'
@@ -899,6 +940,16 @@ runTests() {
   ####################
 
   record_command run_wait_tests
+
+  ####################
+  # kubectl debug    #
+  ####################
+  if kube::test::if_supports_resource "${pods}" ; then
+    record_command run_kubectl_debug_pod_tests
+  fi
+  if kube::test::if_supports_resource "${nodes}" ; then
+    record_command run_kubectl_debug_node_tests
+  fi
 
   cleanup_tests
 }

@@ -23,11 +23,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/util/mount"
-
 	storageosapi "github.com/storageos/go-api"
 	storageostypes "github.com/storageos/go-api/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
+	"k8s.io/kubernetes/pkg/volume"
+	utilexec "k8s.io/utils/exec"
 )
 
 const (
@@ -77,12 +78,16 @@ type apiImplementer interface {
 
 // storageosUtil is the utility structure to interact with the StorageOS API.
 type storageosUtil struct {
-	api apiImplementer
+	api  apiImplementer
+	host volume.VolumeHost
 }
 
 func (u *storageosUtil) NewAPI(apiCfg *storageosAPIConfig) error {
 	if u.api != nil {
 		return nil
+	}
+	if u.host == nil {
+		return errors.New("host must not be nil")
 	}
 	if apiCfg == nil {
 		apiCfg = &storageosAPIConfig{
@@ -99,6 +104,9 @@ func (u *storageosUtil) NewAPI(apiCfg *storageosAPIConfig) error {
 		return err
 	}
 	api.SetAuth(apiCfg.apiUser, apiCfg.apiPass)
+	if err := api.SetDialContext(proxyutil.NewFilteredDialContext(api.GetDialContext(), nil, u.host.GetFilteredDialOptions())); err != nil {
+		return fmt.Errorf("failed to set DialContext in storageos client: %v", err)
+	}
 	u.api = api
 	return nil
 }
@@ -128,8 +136,9 @@ func (u *storageosUtil) CreateVolume(p *storageosProvisioner) (*storageosVolume,
 
 	vol, err := u.api.VolumeCreate(opts)
 	if err != nil {
-		klog.Errorf("volume create failed for volume %q (%v)", opts.Name, err)
-		return nil, err
+		// don't log error details from client calls in events
+		klog.V(4).Infof("volume create failed for volume %q (%v)", opts.Name, err)
+		return nil, errors.New("volume create failed: see kube-controller-manager.log for details")
 	}
 	return &storageosVolume{
 		ID:          vol.ID,
@@ -294,7 +303,12 @@ func (u *storageosUtil) DeleteVolume(d *storageosDeleter) error {
 		Namespace: d.volNamespace,
 		Force:     true,
 	}
-	return u.api.VolumeDelete(opts)
+	if err := u.api.VolumeDelete(opts); err != nil {
+		// don't log error details from client calls in events
+		klog.V(4).Infof("volume deleted failed for volume %q in namespace %q: %v", d.volName, d.volNamespace, err)
+		return errors.New("volume delete failed: see kube-controller-manager.log for details")
+	}
+	return nil
 }
 
 // Get the node's device path from the API, falling back to the default if not
@@ -331,7 +345,7 @@ func pathDeviceType(path string) (deviceType, error) {
 
 // attachFileDevice takes a path to a regular file and makes it available as an
 // attached block device.
-func attachFileDevice(path string, exec mount.Exec) (string, error) {
+func attachFileDevice(path string, exec utilexec.Interface) (string, error) {
 	blockDevicePath, err := getLoopDevice(path, exec)
 	if err != nil && err.Error() != ErrDeviceNotFound {
 		return "", err
@@ -349,7 +363,7 @@ func attachFileDevice(path string, exec mount.Exec) (string, error) {
 }
 
 // Returns the full path to the loop device associated with the given path.
-func getLoopDevice(path string, exec mount.Exec) (string, error) {
+func getLoopDevice(path string, exec utilexec.Interface) (string, error) {
 	_, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return "", errors.New(ErrNotAvailable)
@@ -359,7 +373,7 @@ func getLoopDevice(path string, exec mount.Exec) (string, error) {
 	}
 
 	args := []string{"-j", path}
-	out, err := exec.Run(losetupPath, args...)
+	out, err := exec.Command(losetupPath, args...).CombinedOutput()
 	if err != nil {
 		klog.V(2).Infof("Failed device discover command for path %s: %v", path, err)
 		return "", err
@@ -367,9 +381,9 @@ func getLoopDevice(path string, exec mount.Exec) (string, error) {
 	return parseLosetupOutputForDevice(out)
 }
 
-func makeLoopDevice(path string, exec mount.Exec) (string, error) {
+func makeLoopDevice(path string, exec utilexec.Interface) (string, error) {
 	args := []string{"-f", "-P", "--show", path}
-	out, err := exec.Run(losetupPath, args...)
+	out, err := exec.Command(losetupPath, args...).CombinedOutput()
 	if err != nil {
 		klog.V(2).Infof("Failed device create command for path %s: %v", path, err)
 		return "", err
@@ -377,9 +391,9 @@ func makeLoopDevice(path string, exec mount.Exec) (string, error) {
 	return parseLosetupOutputForDevice(out)
 }
 
-func removeLoopDevice(device string, exec mount.Exec) error {
+func removeLoopDevice(device string, exec utilexec.Interface) error {
 	args := []string{"-d", device}
-	out, err := exec.Run(losetupPath, args...)
+	out, err := exec.Command(losetupPath, args...).CombinedOutput()
 	if err != nil {
 		if !strings.Contains(string(out), "No such device or address") {
 			return err

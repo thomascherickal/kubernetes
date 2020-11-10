@@ -19,6 +19,7 @@ package util
 import (
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"strings"
 	"syscall"
@@ -226,6 +227,16 @@ func TestCheckInvalidErr(t *testing.T) {
 			"The Invalid4 \"invalidation\" is invalid: field4: Invalid value: \"multi4\": details\n",
 			DefaultErrorExitCode,
 		},
+		{
+			&errors.StatusError{metav1.Status{
+				Status: metav1.StatusFailure,
+				Code:   http.StatusUnprocessableEntity,
+				Reason: metav1.StatusReasonInvalid,
+				// Details is nil.
+			}},
+			"The request is invalid",
+			DefaultErrorExitCode,
+		},
 	})
 }
 
@@ -286,7 +297,7 @@ func testCheckError(t *testing.T, tests []checkErrTestCase) {
 
 func TestDumpReaderToFile(t *testing.T) {
 	testString := "TEST STRING"
-	tempFile, err := ioutil.TempFile("", "hlpers_test_dump_")
+	tempFile, err := ioutil.TempFile(os.TempDir(), "hlpers_test_dump_")
 	if err != nil {
 		t.Errorf("unexpected error setting up a temporary file %v", err)
 	}

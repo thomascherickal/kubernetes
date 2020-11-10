@@ -33,8 +33,12 @@ import (
 	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	utilpointer "k8s.io/utils/pointer"
 
-	// enforce that all types are installed
-	_ "k8s.io/kubernetes/pkg/api/testapi"
+	// ensure types are installed
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
+
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 // TestWorkloadDefaults detects changes to defaults within PodTemplateSpec.
@@ -67,10 +71,17 @@ func TestWorkloadDefaults(t *testing.T) {
 		".Spec.Containers[0].ReadinessProbe.PeriodSeconds":          `10`,
 		".Spec.Containers[0].ReadinessProbe.SuccessThreshold":       `1`,
 		".Spec.Containers[0].ReadinessProbe.TimeoutSeconds":         `1`,
+		".Spec.Containers[0].StartupProbe.FailureThreshold":         "3",
+		".Spec.Containers[0].StartupProbe.Handler.HTTPGet.Path":     `"/"`,
+		".Spec.Containers[0].StartupProbe.Handler.HTTPGet.Scheme":   `"HTTP"`,
+		".Spec.Containers[0].StartupProbe.PeriodSeconds":            "10",
+		".Spec.Containers[0].StartupProbe.SuccessThreshold":         "1",
+		".Spec.Containers[0].StartupProbe.TimeoutSeconds":           "1",
 		".Spec.Containers[0].TerminationMessagePath":                `"/dev/termination-log"`,
 		".Spec.Containers[0].TerminationMessagePolicy":              `"File"`,
 		".Spec.DNSPolicy": `"ClusterFirst"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Env[0].ValueFrom.FieldRef.APIVersion":  `"v1"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ImagePullPolicy":                       `"IfNotPresent"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PostStart.HTTPGet.Path":      `"/"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PostStart.HTTPGet.Scheme":    `"HTTP"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PreStop.HTTPGet.Path":        `"/"`,
@@ -88,6 +99,14 @@ func TestWorkloadDefaults(t *testing.T) {
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.PeriodSeconds":          "10",
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.SuccessThreshold":       "1",
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.TimeoutSeconds":         "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.FailureThreshold":         "3",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.Handler.HTTPGet.Path":     `"/"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.Handler.HTTPGet.Scheme":   `"HTTP"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.PeriodSeconds":            "10",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.SuccessThreshold":         "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.TimeoutSeconds":           "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.TerminationMessagePath":                `"/dev/termination-log"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.TerminationMessagePolicy":              `"File"`,
 		".Spec.InitContainers[0].Env[0].ValueFrom.FieldRef.APIVersion":                                `"v1"`,
 		".Spec.InitContainers[0].ImagePullPolicy":                                                     `"IfNotPresent"`,
 		".Spec.InitContainers[0].Lifecycle.PostStart.HTTPGet.Path":                                    `"/"`,
@@ -107,6 +126,12 @@ func TestWorkloadDefaults(t *testing.T) {
 		".Spec.InitContainers[0].ReadinessProbe.PeriodSeconds":                                        `10`,
 		".Spec.InitContainers[0].ReadinessProbe.SuccessThreshold":                                     `1`,
 		".Spec.InitContainers[0].ReadinessProbe.TimeoutSeconds":                                       `1`,
+		".Spec.InitContainers[0].StartupProbe.FailureThreshold":                                       "3",
+		".Spec.InitContainers[0].StartupProbe.Handler.HTTPGet.Path":                                   `"/"`,
+		".Spec.InitContainers[0].StartupProbe.Handler.HTTPGet.Scheme":                                 `"HTTP"`,
+		".Spec.InitContainers[0].StartupProbe.PeriodSeconds":                                          "10",
+		".Spec.InitContainers[0].StartupProbe.SuccessThreshold":                                       "1",
+		".Spec.InitContainers[0].StartupProbe.TimeoutSeconds":                                         "1",
 		".Spec.InitContainers[0].TerminationMessagePath":                                              `"/dev/termination-log"`,
 		".Spec.InitContainers[0].TerminationMessagePolicy":                                            `"File"`,
 		".Spec.RestartPolicy":                                                                         `"Always"`,
@@ -121,6 +146,7 @@ func TestWorkloadDefaults(t *testing.T) {
 		".Spec.Volumes[0].VolumeSource.DownwardAPI.DefaultMode":                                       `420`,
 		".Spec.Volumes[0].VolumeSource.DownwardAPI.Items[0].FieldRef.APIVersion":                      `"v1"`,
 		".Spec.Volumes[0].VolumeSource.EmptyDir":                                                      `{}`,
+		".Spec.Volumes[0].VolumeSource.Ephemeral.VolumeClaimTemplate.Spec.VolumeMode":                 `"Filesystem"`,
 		".Spec.Volumes[0].VolumeSource.HostPath.Type":                                                 `""`,
 		".Spec.Volumes[0].VolumeSource.ISCSI.ISCSIInterface":                                          `"default"`,
 		".Spec.Volumes[0].VolumeSource.Projected.DefaultMode":                                         `420`,
@@ -170,11 +196,18 @@ func TestPodDefaults(t *testing.T) {
 		".Spec.Containers[0].ReadinessProbe.SuccessThreshold":       `1`,
 		".Spec.Containers[0].ReadinessProbe.TimeoutSeconds":         `1`,
 		".Spec.Containers[0].Resources.Requests":                    `{"":"0"}`, // this gets defaulted from the limits field
+		".Spec.Containers[0].StartupProbe.FailureThreshold":         "3",
+		".Spec.Containers[0].StartupProbe.Handler.HTTPGet.Path":     `"/"`,
+		".Spec.Containers[0].StartupProbe.Handler.HTTPGet.Scheme":   `"HTTP"`,
+		".Spec.Containers[0].StartupProbe.PeriodSeconds":            "10",
+		".Spec.Containers[0].StartupProbe.SuccessThreshold":         "1",
+		".Spec.Containers[0].StartupProbe.TimeoutSeconds":           "1",
 		".Spec.Containers[0].TerminationMessagePath":                `"/dev/termination-log"`,
 		".Spec.Containers[0].TerminationMessagePolicy":              `"File"`,
 		".Spec.DNSPolicy":          `"ClusterFirst"`,
 		".Spec.EnableServiceLinks": `true`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Env[0].ValueFrom.FieldRef.APIVersion":  `"v1"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ImagePullPolicy":                       `"IfNotPresent"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PostStart.HTTPGet.Path":      `"/"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PostStart.HTTPGet.Scheme":    `"HTTP"`,
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.Lifecycle.PreStop.HTTPGet.Path":        `"/"`,
@@ -192,6 +225,14 @@ func TestPodDefaults(t *testing.T) {
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.PeriodSeconds":          "10",
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.SuccessThreshold":       "1",
 		".Spec.EphemeralContainers[0].EphemeralContainerCommon.ReadinessProbe.TimeoutSeconds":         "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.FailureThreshold":         "3",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.Handler.HTTPGet.Path":     `"/"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.Handler.HTTPGet.Scheme":   `"HTTP"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.PeriodSeconds":            "10",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.SuccessThreshold":         "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.StartupProbe.TimeoutSeconds":           "1",
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.TerminationMessagePath":                `"/dev/termination-log"`,
+		".Spec.EphemeralContainers[0].EphemeralContainerCommon.TerminationMessagePolicy":              `"File"`,
 		".Spec.InitContainers[0].Env[0].ValueFrom.FieldRef.APIVersion":                                `"v1"`,
 		".Spec.InitContainers[0].ImagePullPolicy":                                                     `"IfNotPresent"`,
 		".Spec.InitContainers[0].Lifecycle.PostStart.HTTPGet.Path":                                    `"/"`,
@@ -214,6 +255,12 @@ func TestPodDefaults(t *testing.T) {
 		".Spec.InitContainers[0].Resources.Requests":                                                  `{"":"0"}`, // this gets defaulted from the limits field
 		".Spec.InitContainers[0].TerminationMessagePath":                                              `"/dev/termination-log"`,
 		".Spec.InitContainers[0].TerminationMessagePolicy":                                            `"File"`,
+		".Spec.InitContainers[0].StartupProbe.FailureThreshold":                                       "3",
+		".Spec.InitContainers[0].StartupProbe.Handler.HTTPGet.Path":                                   `"/"`,
+		".Spec.InitContainers[0].StartupProbe.Handler.HTTPGet.Scheme":                                 `"HTTP"`,
+		".Spec.InitContainers[0].StartupProbe.PeriodSeconds":                                          "10",
+		".Spec.InitContainers[0].StartupProbe.SuccessThreshold":                                       "1",
+		".Spec.InitContainers[0].StartupProbe.TimeoutSeconds":                                         "1",
 		".Spec.RestartPolicy":                                                                         `"Always"`,
 		".Spec.SchedulerName":                                                                         `"default-scheduler"`,
 		".Spec.SecurityContext":                                                                       `{}`,
@@ -226,6 +273,7 @@ func TestPodDefaults(t *testing.T) {
 		".Spec.Volumes[0].VolumeSource.DownwardAPI.DefaultMode":                                       `420`,
 		".Spec.Volumes[0].VolumeSource.DownwardAPI.Items[0].FieldRef.APIVersion":                      `"v1"`,
 		".Spec.Volumes[0].VolumeSource.EmptyDir":                                                      `{}`,
+		".Spec.Volumes[0].VolumeSource.Ephemeral.VolumeClaimTemplate.Spec.VolumeMode":                 `"Filesystem"`,
 		".Spec.Volumes[0].VolumeSource.HostPath.Type":                                                 `""`,
 		".Spec.Volumes[0].VolumeSource.ISCSI.ISCSIInterface":                                          `"default"`,
 		".Spec.Volumes[0].VolumeSource.Projected.DefaultMode":                                         `420`,
@@ -569,7 +617,7 @@ func TestSetDefaultReplicationControllerInitContainers(t *testing.T) {
 
 	assertImagePullPolicy := func(got, expected *v1.Container) error {
 		if got.ImagePullPolicy != expected.ImagePullPolicy {
-			return fmt.Errorf("different image pull poicy: got <%v>, expected <%v>", got.ImagePullPolicy, expected.ImagePullPolicy)
+			return fmt.Errorf("different image pull policy: got <%v>, expected <%v>", got.ImagePullPolicy, expected.ImagePullPolicy)
 		}
 		return nil
 	}
@@ -1202,7 +1250,59 @@ func TestSetDefaultPersistentVolumeClaim(t *testing.T) {
 	}
 }
 
-func TestSetDefaulEndpointsProtocol(t *testing.T) {
+func TestSetDefaultEphemeral(t *testing.T) {
+	fsMode := v1.PersistentVolumeFilesystem
+	blockMode := v1.PersistentVolumeBlock
+
+	tests := []struct {
+		name               string
+		volumeMode         *v1.PersistentVolumeMode
+		expectedVolumeMode v1.PersistentVolumeMode
+	}{
+		{
+			name:               "volume mode nil",
+			volumeMode:         nil,
+			expectedVolumeMode: v1.PersistentVolumeFilesystem,
+		},
+		{
+			name:               "volume mode filesystem",
+			volumeMode:         &fsMode,
+			expectedVolumeMode: v1.PersistentVolumeFilesystem,
+		},
+		{
+			name:               "volume mode block",
+			volumeMode:         &blockMode,
+			expectedVolumeMode: v1.PersistentVolumeBlock,
+		},
+	}
+
+	for _, test := range tests {
+		pod := &v1.Pod{
+			Spec: v1.PodSpec{
+				Volumes: []v1.Volume{
+					{
+						VolumeSource: v1.VolumeSource{
+							Ephemeral: &v1.EphemeralVolumeSource{
+								VolumeClaimTemplate: &v1.PersistentVolumeClaimTemplate{
+									Spec: v1.PersistentVolumeClaimSpec{
+										VolumeMode: test.volumeMode,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		obj1 := roundTrip(t, runtime.Object(pod))
+		pod1 := obj1.(*v1.Pod)
+		if *pod1.Spec.Volumes[0].VolumeSource.Ephemeral.VolumeClaimTemplate.Spec.VolumeMode != test.expectedVolumeMode {
+			t.Errorf("Test %s failed, Expected VolumeMode: %v, but got %v", test.name, test.volumeMode, *pod1.Spec.Volumes[0].VolumeSource.Ephemeral.VolumeClaimTemplate.Spec.VolumeMode)
+		}
+	}
+}
+
+func TestSetDefaultEndpointsProtocol(t *testing.T) {
 	in := &v1.Endpoints{Subsets: []v1.EndpointSubset{
 		{Ports: []v1.EndpointPort{{}, {Protocol: "UDP"}, {}}},
 	}}
@@ -1224,7 +1324,7 @@ func TestSetDefaulEndpointsProtocol(t *testing.T) {
 	}
 }
 
-func TestSetDefaulServiceTargetPort(t *testing.T) {
+func TestSetDefaultServiceTargetPort(t *testing.T) {
 	in := &v1.Service{Spec: v1.ServiceSpec{Ports: []v1.ServicePort{{Port: 1234}}}}
 	obj := roundTrip(t, runtime.Object(in))
 	out := obj.(*v1.Service)
@@ -1284,7 +1384,7 @@ func TestSetDefaultServicePort(t *testing.T) {
 	}
 }
 
-func TestSetDefaulServiceExternalTraffic(t *testing.T) {
+func TestSetDefaultServiceExternalTraffic(t *testing.T) {
 	in := &v1.Service{}
 	obj := roundTrip(t, runtime.Object(in))
 	out := obj.(*v1.Service)
@@ -1700,5 +1800,255 @@ func TestSetDefaultEnableServiceLinks(t *testing.T) {
 	output := roundTrip(t, runtime.Object(pod)).(*v1.Pod)
 	if output.Spec.EnableServiceLinks == nil || *output.Spec.EnableServiceLinks != v1.DefaultEnableServiceLinks {
 		t.Errorf("Expected enableServiceLinks value: %+v\ngot: %+v\n", v1.DefaultEnableServiceLinks, *output.Spec.EnableServiceLinks)
+	}
+}
+
+func TestSetDefaultIPFamilies(t *testing.T) {
+	preferDualStack := v1.IPFamilyPolicyPreferDualStack
+	requireDualStack := v1.IPFamilyPolicyRequireDualStack
+	testCases := []struct {
+		name                       string
+		expectedIPFamiliesWithGate []v1.IPFamily
+		svc                        v1.Service
+	}{
+		{
+			name:                       "must not set for ExternalName",
+			expectedIPFamiliesWithGate: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type: v1.ServiceTypeExternalName,
+				},
+			},
+		},
+		{
+			name:                       "must not set for single stack",
+			expectedIPFamiliesWithGate: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type: v1.ServiceTypeClusterIP,
+				},
+			},
+		},
+		{
+			name:                       "must not set for single stack, even when a family is set",
+			expectedIPFamiliesWithGate: []v1.IPFamily{v1.IPv6Protocol},
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:       v1.ServiceTypeClusterIP,
+					IPFamilies: []v1.IPFamily{v1.IPv6Protocol},
+				},
+			},
+		},
+		{
+			name:                       "must not set for preferDualStack",
+			expectedIPFamiliesWithGate: []v1.IPFamily{v1.IPv6Protocol},
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:           v1.ServiceTypeClusterIP,
+					IPFamilyPolicy: &preferDualStack,
+					IPFamilies:     []v1.IPFamily{v1.IPv6Protocol},
+				},
+			},
+		},
+		{
+			name:                       "must set for requireDualStack (6,4)",
+			expectedIPFamiliesWithGate: []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol},
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:           v1.ServiceTypeClusterIP,
+					IPFamilyPolicy: &requireDualStack,
+					IPFamilies:     []v1.IPFamily{v1.IPv6Protocol},
+				},
+			},
+		},
+		{
+			name:                       "must set for requireDualStack (4,6)",
+			expectedIPFamiliesWithGate: []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol},
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:           v1.ServiceTypeClusterIP,
+					IPFamilyPolicy: &requireDualStack,
+					IPFamilies:     []v1.IPFamily{v1.IPv4Protocol},
+				},
+			},
+		},
+	}
+	for _, test := range testCases {
+		// run with gate
+		t.Run(test.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
+			obj2 := roundTrip(t, runtime.Object(&test.svc))
+			svc2 := obj2.(*v1.Service)
+
+			if len(test.expectedIPFamiliesWithGate) != len(svc2.Spec.IPFamilies) {
+				t.Fatalf("expected .spec.IPFamilies len:%v got %v", len(test.expectedIPFamiliesWithGate), len(svc2.Spec.IPFamilies))
+			}
+
+			for i, family := range test.expectedIPFamiliesWithGate {
+				if svc2.Spec.IPFamilies[i] != family {
+					t.Fatalf("failed. expected family %v at %v got %v", family, i, svc2.Spec.IPFamilies[i])
+				}
+			}
+		})
+
+		// run without gate (families should not change)
+		t.Run(fmt.Sprintf("without-gate:%s", test.name), func(t *testing.T) {
+			obj2 := roundTrip(t, runtime.Object(&test.svc))
+			svc2 := obj2.(*v1.Service)
+
+			if len(test.svc.Spec.IPFamilies) != len(svc2.Spec.IPFamilies) {
+				t.Fatalf("expected .spec.IPFamilies len:%v got %v", len(test.expectedIPFamiliesWithGate), len(svc2.Spec.IPFamilies))
+			}
+
+			for i, family := range test.svc.Spec.IPFamilies {
+				if svc2.Spec.IPFamilies[i] != family {
+					t.Fatalf("failed. expected family %v at %v got %v", family, i, svc2.Spec.IPFamilies[i])
+				}
+			}
+		})
+
+	}
+}
+
+func TestSetDefaultServiceIPFamilyPolicy(t *testing.T) {
+	singleStack := v1.IPFamilyPolicySingleStack
+	preferDualStack := v1.IPFamilyPolicyPreferDualStack
+	requireDualStack := v1.IPFamilyPolicyRequireDualStack
+
+	testCases := []struct {
+		name                   string
+		expectedIPfamilyPolicy *v1.IPFamilyPolicyType
+		svc                    v1.Service
+	}{
+		{
+			name:                   "must not set for ExternalName",
+			expectedIPfamilyPolicy: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type: v1.ServiceTypeExternalName,
+				},
+			},
+		},
+		{
+			name:                   "must not set for ExternalName even with semantically valid data",
+			expectedIPfamilyPolicy: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:       v1.ServiceTypeExternalName,
+					ClusterIPs: []string{"1.2.3.4", "2001::1"},
+					IPFamilies: []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol},
+				},
+			},
+		},
+		{
+			name:                   "must set if there are more than one ip",
+			expectedIPfamilyPolicy: &requireDualStack,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					ClusterIPs: []string{"1.2.3.4", "2001::1"},
+				},
+			},
+		},
+		{
+			name:                   "must set if there are more than one ip family",
+			expectedIPfamilyPolicy: &requireDualStack,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					IPFamilies: []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol},
+				},
+			},
+		},
+		{
+			name:                   "must not set if there is one ip",
+			expectedIPfamilyPolicy: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+			},
+		},
+		{
+			name:                   "must not set if there is one ip family",
+			expectedIPfamilyPolicy: nil,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					IPFamilies: []v1.IPFamily{v1.IPv4Protocol},
+				},
+			},
+		},
+		{
+			name:                   "must not override user input",
+			expectedIPfamilyPolicy: &singleStack,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					IPFamilyPolicy: &singleStack,
+				},
+			},
+		},
+		{
+			name:                   "must not override user input/ preferDualStack",
+			expectedIPfamilyPolicy: &preferDualStack,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					IPFamilyPolicy: &preferDualStack,
+				},
+			},
+		},
+
+		{
+			name:                   "must not override user input even when it is invalid",
+			expectedIPfamilyPolicy: &preferDualStack,
+
+			svc: v1.Service{
+				Spec: v1.ServiceSpec{
+					IPFamilies:     []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol},
+					IPFamilyPolicy: &preferDualStack,
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		// with gate
+		t.Run(test.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
+			obj2 := roundTrip(t, runtime.Object(&test.svc))
+			svc2 := obj2.(*v1.Service)
+
+			if test.expectedIPfamilyPolicy == nil && svc2.Spec.IPFamilyPolicy != nil {
+				t.Fatalf("expected .spec.PreferDualStack to be unset (nil)")
+			}
+			if test.expectedIPfamilyPolicy != nil && (svc2.Spec.IPFamilyPolicy == nil || *(svc2.Spec.IPFamilyPolicy) != *(test.expectedIPfamilyPolicy)) {
+				t.Fatalf("expected .spec.PreferDualStack to be set to %v got %v", *(test.expectedIPfamilyPolicy), svc2.Spec.IPFamilyPolicy)
+			}
+		})
+
+		// without gate. IPFamilyPolicy should never change
+		t.Run(test.name, func(t *testing.T) {
+			obj2 := roundTrip(t, runtime.Object(&test.svc))
+			svc2 := obj2.(*v1.Service)
+
+			if test.svc.Spec.IPFamilyPolicy == nil && svc2.Spec.IPFamilyPolicy != nil {
+				t.Fatalf("expected .spec.PreferDualStack to be unset (nil)")
+			}
+			if test.svc.Spec.IPFamilyPolicy != nil && (svc2.Spec.IPFamilyPolicy == nil || *(svc2.Spec.IPFamilyPolicy) != *(test.expectedIPfamilyPolicy)) {
+				t.Fatalf("expected .spec.PreferDualStack to be set to %v got %v", *(test.expectedIPfamilyPolicy), svc2.Spec.IPFamilyPolicy)
+			}
+		})
+
 	}
 }

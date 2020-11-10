@@ -17,7 +17,6 @@ limitations under the License.
 package cmd
 
 import (
-	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -25,7 +24,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
-	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 )
 
 const (
@@ -83,13 +81,6 @@ func TestNewInitData(t *testing.T) {
 			name: "fail if unknown feature gates flag are passed",
 			flags: map[string]string{
 				options.FeatureGatesString: "unknown=true",
-			},
-			expectError: true,
-		},
-		{
-			name: "fail if deprecated feature gates are set",
-			flags: map[string]string{
-				options.FeatureGatesString: fmt.Sprintf("%s=true", features.CoreDNS),
 			},
 			expectError: true,
 		},
@@ -162,7 +153,7 @@ func TestNewInitData(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// initialize an external init option and inject it to the init cmd
 			initOptions := newInitOptions()
-			cmd := NewCmdInit(nil, initOptions)
+			cmd := newCmdInit(nil, initOptions)
 
 			// sets cmd flags (that will be reflected on the init options)
 			for f, v := range tc.flags {

@@ -21,15 +21,15 @@ import (
 	"os"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
-	utilmount "k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
+	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	utilpath "k8s.io/utils/path"
 )
 
@@ -50,13 +50,13 @@ func newHostPathTypeList(pathType ...string) []*v1.HostPathType {
 
 func TestCanSupport(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("fake", nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "fake", nil, nil))
 
-	plug, err := plugMgr.FindPluginByName("kubernetes.io/host-path")
+	plug, err := plugMgr.FindPluginByName(hostPathPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
-	if plug.GetPluginName() != "kubernetes.io/host-path" {
+	if plug.GetPluginName() != hostPathPluginName {
 		t.Errorf("Wrong name: %s", plug.GetPluginName())
 	}
 	if !plug.CanSupport(&volume.Spec{Volume: &v1.Volume{VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{}}}}) {
@@ -72,11 +72,11 @@ func TestCanSupport(t *testing.T) {
 
 func TestGetAccessModes(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil))
 
-	plug, err := plugMgr.FindPersistentPluginByName("kubernetes.io/host-path")
+	plug, err := plugMgr.FindPersistentPluginByName(hostPathPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 	if len(plug.GetAccessModes()) != 1 || plug.GetAccessModes()[0] != v1.ReadWriteOnce {
 		t.Errorf("Expected %s PersistentVolumeAccessMode", v1.ReadWriteOnce)
@@ -85,7 +85,7 @@ func TestGetAccessModes(t *testing.T) {
 
 func TestRecycler(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
-	pluginHost := volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil)
+	pluginHost := volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil)
 	plugMgr.InitPlugins([]volume.VolumePlugin{&hostPathPlugin{nil, volume.VolumeConfig{}}}, nil, pluginHost)
 
 	spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/foo"}}}}}
@@ -104,12 +104,12 @@ func TestDeleter(t *testing.T) {
 	}
 	defer os.RemoveAll(tempPath)
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil))
 
 	spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: tempPath}}}}}
 	plug, err := plugMgr.FindDeletablePluginBySpec(spec)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 	deleter, err := plug.NewDeleter(spec)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestDeleterTempDir(t *testing.T) {
 
 	for name, test := range tests {
 		plugMgr := volume.VolumePluginMgr{}
-		plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil))
+		plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil))
 		spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: test.path}}}}}
 		plug, _ := plugMgr.FindDeletablePluginBySpec(spec)
 		deleter, _ := plug.NewDeleter(spec)
@@ -156,7 +156,7 @@ func TestProvisioner(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
 	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{ProvisioningEnabled: true}),
 		nil,
-		volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil))
+		volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil))
 	spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{
 		PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: fmt.Sprintf("/tmp/hostpath.%s", uuid.NewUUID())}}}}}
 	plug, err := plugMgr.FindCreatablePluginBySpec(spec)
@@ -203,7 +203,7 @@ func TestProvisioner(t *testing.T) {
 
 func TestInvalidHostPath(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("fake", nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "fake", nil, nil))
 
 	plug, err := plugMgr.FindPluginByName(hostPathPluginName)
 	if err != nil {
@@ -228,11 +228,11 @@ func TestInvalidHostPath(t *testing.T) {
 
 func TestPlugin(t *testing.T) {
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("fake", nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "fake", nil, nil))
 
-	plug, err := plugMgr.FindPluginByName("kubernetes.io/host-path")
+	plug, err := plugMgr.FindPluginByName(hostPathPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	volPath := "/tmp/vol1"
@@ -304,7 +304,7 @@ func TestPersistentClaimReadOnlyFlag(t *testing.T) {
 	client := fake.NewSimpleClientset(pv, claim)
 
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost("/tmp/fake", client, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeVolumeHost(t, "/tmp/fake", client, nil))
 	plug, _ := plugMgr.FindPluginByName(hostPathPluginName)
 
 	// readOnly bool is supplied by persistent-claim volume source when its mounter creates other volumes
@@ -327,10 +327,10 @@ func setUp() error {
 	}
 
 	f, err := os.OpenFile("/tmp/ExistingFolder/foo", os.O_CREATE, os.FileMode(0644))
-	defer f.Close()
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	return nil
 }
@@ -358,13 +358,13 @@ func TestOSFileTypeChecker(t *testing.T) {
 		{
 			name:        "Existing Folder",
 			path:        "/tmp/ExistingFolder",
-			desiredType: string(utilmount.FileTypeDirectory),
+			desiredType: string(hostutil.FileTypeDirectory),
 			isDir:       true,
 		},
 		{
 			name:        "Existing File",
 			path:        "/tmp/ExistingFolder/foo",
-			desiredType: string(utilmount.FileTypeFile),
+			desiredType: string(hostutil.FileTypeFile),
 			isFile:      true,
 		},
 		{
@@ -388,11 +388,10 @@ func TestOSFileTypeChecker(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		fakeFTC := &utilmount.FakeHostUtil{
-			Filesystem: map[string]utilmount.FileType{
-				tc.path: utilmount.FileType(tc.desiredType),
-			},
-		}
+		fakeFTC := hostutil.NewFakeHostUtil(
+			map[string]hostutil.FileType{
+				tc.path: hostutil.FileType(tc.desiredType),
+			})
 		oftc := newFileTypeChecker(tc.path, fakeFTC)
 
 		path := oftc.GetPath()
@@ -448,7 +447,7 @@ func TestOSFileTypeChecker(t *testing.T) {
 			if oftc.IsDir() {
 				t.Errorf("[%d: %q] expected socket file, got unexpected folder: %s", i, tc.name, path)
 			}
-			if !oftc.IsFile() {
+			if oftc.IsFile() {
 				t.Errorf("[%d: %q] expected socket file, got unexpected file: %s", i, tc.name, path)
 			}
 			if oftc.IsBlock() {
@@ -466,7 +465,7 @@ func TestOSFileTypeChecker(t *testing.T) {
 			if oftc.IsDir() {
 				t.Errorf("[%d: %q] expected character device, got unexpected folder: %s", i, tc.name, path)
 			}
-			if !oftc.IsFile() {
+			if oftc.IsFile() {
 				t.Errorf("[%d: %q] expected character device, got unexpected file: %s", i, tc.name, path)
 			}
 			if oftc.IsSocket() {
@@ -484,7 +483,7 @@ func TestOSFileTypeChecker(t *testing.T) {
 			if oftc.IsDir() {
 				t.Errorf("[%d: %q] expected block device, got unexpected folder: %s", i, tc.name, path)
 			}
-			if !oftc.IsFile() {
+			if oftc.IsFile() {
 				t.Errorf("[%d: %q] expected block device, got unexpected file: %s", i, tc.name, path)
 			}
 			if oftc.IsSocket() {

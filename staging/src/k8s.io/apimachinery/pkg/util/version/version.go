@@ -24,7 +24,7 @@ import (
 	"strings"
 )
 
-// Version is an opqaue representation of a version number
+// Version is an opaque representation of a version number
 type Version struct {
 	components    []uint
 	semver        bool
@@ -180,6 +180,14 @@ func (v *Version) WithPreRelease(preRelease string) *Version {
 	result := *v
 	result.components = []uint{v.Major(), v.Minor(), v.Patch()}
 	result.preRelease = preRelease
+	return &result
+}
+
+// WithBuildMetadata returns copy of the version object with requested buildMetadata
+func (v *Version) WithBuildMetadata(buildMetadata string) *Version {
+	result := *v
+	result.components = []uint{v.Major(), v.Minor(), v.Patch()}
+	result.buildMetadata = buildMetadata
 	return &result
 }
 

@@ -24,11 +24,12 @@ import (
 	"time"
 
 	jsonpatch "github.com/evanphx/json-patch"
+
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	admissionv1 "k8s.io/api/admission/v1"
-	"k8s.io/api/admissionregistration/v1beta1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,9 +41,9 @@ import (
 	webhookerrors "k8s.io/apiserver/pkg/admission/plugin/webhook/errors"
 	"k8s.io/apiserver/pkg/admission/plugin/webhook/generic"
 	webhookrequest "k8s.io/apiserver/pkg/admission/plugin/webhook/request"
-	"k8s.io/apiserver/pkg/admission/plugin/webhook/util"
 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	webhookutil "k8s.io/apiserver/pkg/util/webhook"
+	"k8s.io/apiserver/pkg/warning"
 	utiltrace "k8s.io/utils/trace"
 )
 
@@ -56,7 +57,7 @@ const (
 	MutationAuditAnnotationPrefix = "mutation.webhook.admission.k8s.io/"
 )
 
-var encodingjson = json.CaseSensitiveJsonIterator()
+var encodingjson = json.CaseSensitiveJSONIterator()
 
 type mutatingDispatcher struct {
 	cm     *webhookutil.ClientManager
@@ -104,7 +105,7 @@ func (a *mutatingDispatcher) Dispatch(ctx context.Context, attr admission.Attrib
 		}
 		hook, ok := invocation.Webhook.GetMutatingWebhook()
 		if !ok {
-			return fmt.Errorf("mutating webhook dispatch requires v1beta1.MutatingWebhook, but got %T", hook)
+			return fmt.Errorf("mutating webhook dispatch requires v1.MutatingWebhook, but got %T", hook)
 		}
 		// This means that during reinvocation, a webhook will not be
 		// called for the first time. For example, if the webhook is
@@ -134,20 +135,36 @@ func (a *mutatingDispatcher) Dispatch(ctx context.Context, attr admission.Attrib
 			round = 1
 		}
 		changed, err := a.callAttrMutatingHook(ctx, hook, invocation, versionedAttr, o, round, i)
-		admissionmetrics.Metrics.ObserveWebhook(time.Since(t), err != nil, versionedAttr.Attributes, "admit", hook.Name)
+		ignoreClientCallFailures := hook.FailurePolicy != nil && *hook.FailurePolicy == admissionregistrationv1.Ignore
+		rejected := false
+		if err != nil {
+			switch err := err.(type) {
+			case *webhookutil.ErrCallingWebhook:
+				if !ignoreClientCallFailures {
+					rejected = true
+					admissionmetrics.Metrics.ObserveWebhookRejection(hook.Name, "admit", string(versionedAttr.Attributes.GetOperation()), admissionmetrics.WebhookRejectionCallingWebhookError, 0)
+				}
+			case *webhookutil.ErrWebhookRejection:
+				rejected = true
+				admissionmetrics.Metrics.ObserveWebhookRejection(hook.Name, "admit", string(versionedAttr.Attributes.GetOperation()), admissionmetrics.WebhookRejectionNoError, int(err.Status.ErrStatus.Code))
+			default:
+				rejected = true
+				admissionmetrics.Metrics.ObserveWebhookRejection(hook.Name, "admit", string(versionedAttr.Attributes.GetOperation()), admissionmetrics.WebhookRejectionAPIServerInternalError, 0)
+			}
+		}
+		admissionmetrics.Metrics.ObserveWebhook(time.Since(t), rejected, versionedAttr.Attributes, "admit", hook.Name)
 		if changed {
 			// Patch had changed the object. Prepare to reinvoke all previous webhooks that are eligible for re-invocation.
 			webhookReinvokeCtx.RequireReinvokingPreviouslyInvokedPlugins()
 			reinvokeCtx.SetShouldReinvoke()
 		}
-		if hook.ReinvocationPolicy != nil && *hook.ReinvocationPolicy == v1beta1.IfNeededReinvocationPolicy {
+		if hook.ReinvocationPolicy != nil && *hook.ReinvocationPolicy == admissionregistrationv1.IfNeededReinvocationPolicy {
 			webhookReinvokeCtx.AddReinvocableWebhookToPreviouslyInvoked(invocation.Webhook.GetUID())
 		}
 		if err == nil {
 			continue
 		}
 
-		ignoreClientCallFailures := hook.FailurePolicy != nil && *hook.FailurePolicy == v1beta1.Ignore
 		if callErr, ok := err.(*webhookutil.ErrCallingWebhook); ok {
 			if ignoreClientCallFailures {
 				klog.Warningf("Failed calling webhook, failing open %v: %v", hook.Name, callErr)
@@ -165,6 +182,9 @@ func (a *mutatingDispatcher) Dispatch(ctx context.Context, attr admission.Attrib
 			klog.Warningf("Failed calling webhook, failing closed %v: %v", hook.Name, err)
 			return apierrors.NewInternalError(err)
 		}
+		if rejectionErr, ok := err.(*webhookutil.ErrWebhookRejection); ok {
+			return rejectionErr.Status
+		}
 		return err
 	}
 
@@ -178,7 +198,7 @@ func (a *mutatingDispatcher) Dispatch(ctx context.Context, attr admission.Attrib
 
 // note that callAttrMutatingHook updates attr
 
-func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta1.MutatingWebhook, invocation *generic.WebhookInvocation, attr *generic.VersionedAttributes, o admission.ObjectInterfaces, round, idx int) (bool, error) {
+func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *admissionregistrationv1.MutatingWebhook, invocation *generic.WebhookInvocation, attr *generic.VersionedAttributes, o admission.ObjectInterfaces, round, idx int) (bool, error) {
 	configurationName := invocation.Webhook.GetConfigurationName()
 	annotator := newWebhookAnnotator(attr, round, idx, h.Name, configurationName)
 	changed := false
@@ -187,7 +207,7 @@ func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta
 		if h.SideEffects == nil {
 			return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: fmt.Errorf("Webhook SideEffects is nil")}
 		}
-		if !(*h.SideEffects == v1beta1.SideEffectClassNone || *h.SideEffects == v1beta1.SideEffectClassNoneOnDryRun) {
+		if !(*h.SideEffects == admissionregistrationv1.SideEffectClassNone || *h.SideEffects == admissionregistrationv1.SideEffectClassNoneOnDryRun) {
 			return false, webhookerrors.NewDryRunUnsupportedErr(h.Name)
 		}
 	}
@@ -197,7 +217,7 @@ func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta
 		return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: err}
 	}
 	// Make the webhook request
-	client, err := a.cm.HookClient(util.HookClientConfigForWebhook(invocation.Webhook))
+	client, err := invocation.Webhook.GetRESTClient(a.cm)
 	if err != nil {
 		return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: err}
 	}
@@ -217,7 +237,7 @@ func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta
 		defer cancel()
 	}
 
-	r := client.Post().Context(ctx).Body(request)
+	r := client.Post().Body(request)
 
 	// if the context has a deadline, set it as a parameter to inform the backend
 	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
@@ -232,7 +252,7 @@ func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta
 		}
 	}
 
-	if err := r.Do().Into(response); err != nil {
+	if err := r.Do(ctx).Into(response); err != nil {
 		return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: err}
 	}
 	trace.Step("Request completed")
@@ -248,9 +268,12 @@ func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *v1beta
 			klog.Warningf("Failed to set admission audit annotation %s to %s for mutating webhook %s: %v", key, v, h.Name, err)
 		}
 	}
+	for _, w := range result.Warnings {
+		warning.AddWarning(ctx, "", w)
+	}
 
 	if !result.Allowed {
-		return false, webhookerrors.ToStatusErr(h.Name, result.Result)
+		return false, &webhookutil.ErrWebhookRejection{Status: webhookerrors.ToStatusErr(h.Name, result.Result)}
 	}
 
 	if len(result.Patch) == 0 {

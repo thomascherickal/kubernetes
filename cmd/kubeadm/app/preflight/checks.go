@@ -39,16 +39,14 @@ import (
 	netutil "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
-	"k8s.io/klog"
+	kubeadmversion "k8s.io/component-base/version"
+	"k8s.io/klog/v2"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/images"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/initsystem"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/system"
-	kubeadmversion "k8s.io/kubernetes/cmd/kubeadm/app/version"
-	"k8s.io/kubernetes/pkg/registry/core/service/ipallocator"
-	ipvsutil "k8s.io/kubernetes/pkg/util/ipvs"
+	system "k8s.io/system-validators/validators"
 	utilsexec "k8s.io/utils/exec"
 	utilsnet "k8s.io/utils/net"
 )
@@ -127,7 +125,7 @@ func (sc ServiceCheck) Name() string {
 
 // Check validates if the service is enabled and active.
 func (sc ServiceCheck) Check() (warnings, errorList []error) {
-	klog.V(1).Infoln("validating if the service is enabled and active")
+	klog.V(1).Infof("validating if the %q service is enabled and active", sc.Service)
 	initSystem, err := initsystem.GetInitSystem()
 	if err != nil {
 		return []error{err}, nil
@@ -432,9 +430,12 @@ func (hst HTTPProxyCheck) Name() string {
 // Check validates http connectivity type, direct or via proxy.
 func (hst HTTPProxyCheck) Check() (warnings, errorList []error) {
 	klog.V(1).Infoln("validating if the connectivity type is via proxy or direct")
-	u := (&url.URL{Scheme: hst.Proto, Host: hst.Host}).String()
+	u := &url.URL{Scheme: hst.Proto, Host: hst.Host}
+	if utilsnet.IsIPv6String(hst.Host) {
+		u.Host = net.JoinHostPort(hst.Host, "1234")
+	}
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -477,7 +478,7 @@ func (subnet HTTPProxyCIDRCheck) Check() (warnings, errorList []error) {
 		return nil, []error{errors.Wrapf(err, "error parsing CIDR %q", subnet.CIDR)}
 	}
 
-	testIP, err := ipallocator.GetIndexedIP(cidr, 1)
+	testIP, err := utilsnet.GetIndexedIP(cidr, 1)
 	if err != nil {
 		return nil, []error{errors.Wrapf(err, "unable to get first IP address from the given CIDR (%s)", cidr.String())}
 	}
@@ -544,10 +545,10 @@ func (sysver SystemVerificationCheck) Check() (warnings, errorList []error) {
 	for _, v := range validators {
 		warn, err := v.Validate(system.DefaultSysSpec)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, err...)
 		}
 		if warn != nil {
-			warns = append(warns, warn)
+			warns = append(warns, warn...)
 		}
 	}
 
@@ -802,6 +803,7 @@ func getEtcdVersionResponse(client *http.Client, url string, target interface{})
 				loopCount--
 				return false, err
 			}
+			//lint:ignore SA5011 If err != nil we are already returning.
 			defer r.Body.Close()
 
 			if r != nil && r.StatusCode >= 500 && r.StatusCode <= 599 {
@@ -867,20 +869,20 @@ func (ncc NumCPUCheck) Check() (warnings, errorList []error) {
 	return warnings, errorList
 }
 
-// IPVSProxierCheck tests if IPVS proxier can be used.
-type IPVSProxierCheck struct {
-	exec utilsexec.Interface
+// MemCheck checks if the number of megabytes of memory is not less than required
+type MemCheck struct {
+	Mem uint64
 }
 
-// Name returns label for IPVSProxierCheck
-func (r IPVSProxierCheck) Name() string {
-	return "IPVSProxierCheck"
+// Name returns the label for memory
+func (MemCheck) Name() string {
+	return "Mem"
 }
 
 // RunInitNodeChecks executes all individual, applicable to control-plane node checks.
 // The boolean flag 'isSecondaryControlPlane' controls whether we are running checks in a --join-control-plane scenario.
 // The boolean flag 'downloadCerts' controls whether we should skip checks on certificates because we are downloading them.
-// If the flag is set to true we should skip checks already executed by RunJoinNodeChecks and RunOptionalJoinNodeChecks.
+// If the flag is set to true we should skip checks already executed by RunJoinNodeChecks.
 func RunInitNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.InitConfiguration, ignorePreflightErrors sets.String, isSecondaryControlPlane bool, downloadCerts bool) error {
 	if !isSecondaryControlPlane {
 		// First, check if we're root separately from the other preflight checks and fail fast
@@ -892,31 +894,31 @@ func RunInitNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.InitConfigura
 	manifestsDir := filepath.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.ManifestsSubDirName)
 	checks := []Checker{
 		NumCPUCheck{NumCPU: kubeadmconstants.ControlPlaneNumCPU},
+		// Linux only
+		// TODO: support other OS, if control-plane is supported on it.
+		MemCheck{Mem: kubeadmconstants.ControlPlaneMem},
 		KubernetesVersionCheck{KubernetesVersion: cfg.KubernetesVersion, KubeadmVersion: kubeadmversion.Get().GitVersion},
 		FirewalldCheck{ports: []int{int(cfg.LocalAPIEndpoint.BindPort), kubeadmconstants.KubeletPort}},
 		PortOpenCheck{port: int(cfg.LocalAPIEndpoint.BindPort)},
-		PortOpenCheck{port: kubeadmconstants.InsecureSchedulerPort},
-		PortOpenCheck{port: kubeadmconstants.InsecureKubeControllerManagerPort},
+		PortOpenCheck{port: kubeadmconstants.KubeSchedulerPort},
+		PortOpenCheck{port: kubeadmconstants.KubeControllerManagerPort},
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeAPIServer, manifestsDir)},
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeControllerManager, manifestsDir)},
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeScheduler, manifestsDir)},
 		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.Etcd, manifestsDir)},
 		HTTPProxyCheck{Proto: "https", Host: cfg.LocalAPIEndpoint.AdvertiseAddress},
-		HTTPProxyCIDRCheck{Proto: "https", CIDR: cfg.Networking.ServiceSubnet},
 	}
-
-	cidrs := strings.Split(cfg.Networking.PodSubnet, ",")
+	cidrs := strings.Split(cfg.Networking.ServiceSubnet, ",")
+	for _, cidr := range cidrs {
+		checks = append(checks, HTTPProxyCIDRCheck{Proto: "https", CIDR: cidr})
+	}
+	cidrs = strings.Split(cfg.Networking.PodSubnet, ",")
 	for _, cidr := range cidrs {
 		checks = append(checks, HTTPProxyCIDRCheck{Proto: "https", CIDR: cidr})
 	}
 
 	if !isSecondaryControlPlane {
 		checks = addCommonChecks(execer, cfg.KubernetesVersion, &cfg.NodeRegistration, checks)
-
-		// Check if IVPS kube-proxy mode is supported
-		if cfg.ComponentConfigs.KubeProxy != nil && cfg.ComponentConfigs.KubeProxy.Mode == ipvsutil.IPVSProxyMode {
-			checks = append(checks, IPVSProxierCheck{exec: execer})
-		}
 
 		// Check if Bridge-netfilter and IPv6 relevant flags are set
 		if ip := net.ParseIP(cfg.LocalAPIEndpoint.AdvertiseAddress); ip != nil {
@@ -1001,18 +1003,6 @@ func RunJoinNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.JoinConfigura
 	return RunChecks(checks, os.Stderr, ignorePreflightErrors)
 }
 
-// RunOptionalJoinNodeChecks executes all individual, applicable to node configuration dependant checks
-func RunOptionalJoinNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.ClusterConfiguration, ignorePreflightErrors sets.String) error {
-	checks := []Checker{}
-
-	// Check if IPVS kube-proxy mode is supported
-	if cfg.ComponentConfigs.KubeProxy != nil && cfg.ComponentConfigs.KubeProxy.Mode == ipvsutil.IPVSProxyMode {
-		checks = append(checks, IPVSProxierCheck{exec: execer})
-	}
-
-	return RunChecks(checks, os.Stderr, ignorePreflightErrors)
-}
-
 // addCommonChecks is a helper function to duplicate checks that are common between both the
 // kubeadm init and join commands
 func addCommonChecks(execer utilsexec.Interface, k8sVersion string, nodeReg *kubeadmapi.NodeRegistrationOptions, checks []Checker) []Checker {
@@ -1041,6 +1031,7 @@ func addCommonChecks(execer utilsexec.Interface, k8sVersion string, nodeReg *kub
 			FileContentCheck{Path: bridgenf, Content: []byte{'1'}},
 			FileContentCheck{Path: ipv4Forward, Content: []byte{'1'}},
 			SwapCheck{},
+			InPathCheck{executable: "conntrack", mandatory: true, exec: execer},
 			InPathCheck{executable: "ip", mandatory: true, exec: execer},
 			InPathCheck{executable: "iptables", mandatory: true, exec: execer},
 			InPathCheck{executable: "mount", mandatory: true, exec: execer},

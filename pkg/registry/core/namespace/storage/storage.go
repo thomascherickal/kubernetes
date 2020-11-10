@@ -23,7 +23,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/registry/generic"
@@ -222,6 +221,7 @@ func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.Va
 				return existingNamespace, nil
 			}),
 			dryrun.IsDryRun(options.DryRun),
+			nil,
 		)
 
 		if err != nil {
@@ -238,8 +238,7 @@ func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.Va
 
 	// prior to final deletion, we must ensure that finalizers is empty
 	if len(namespace.Spec.Finalizers) != 0 {
-		err = apierrors.NewConflict(api.Resource("namespaces"), namespace.Name, fmt.Errorf("The system is ensuring all content is removed from this namespace.  Upon completion, this namespace will automatically be purged by the system."))
-		return nil, false, err
+		return namespace, false, nil
 	}
 	return r.store.Delete(ctx, name, deleteValidation, options)
 }
@@ -255,7 +254,9 @@ func ShouldDeleteNamespaceDuringUpdate(ctx context.Context, key string, obj, exi
 }
 
 func shouldHaveOrphanFinalizer(options *metav1.DeleteOptions, haveOrphanFinalizer bool) bool {
+	//lint:ignore SA1019 backwards compatibility
 	if options.OrphanDependents != nil {
+		//lint:ignore SA1019 backwards compatibility
 		return *options.OrphanDependents
 	}
 	if options.PropagationPolicy != nil {
@@ -265,7 +266,9 @@ func shouldHaveOrphanFinalizer(options *metav1.DeleteOptions, haveOrphanFinalize
 }
 
 func shouldHaveDeleteDependentsFinalizer(options *metav1.DeleteOptions, haveDeleteDependentsFinalizer bool) bool {
+	//lint:ignore SA1019 backwards compatibility
 	if options.OrphanDependents != nil {
+		//lint:ignore SA1019 backwards compatibility
 		return *options.OrphanDependents == false
 	}
 	if options.PropagationPolicy != nil {
@@ -274,7 +277,7 @@ func shouldHaveDeleteDependentsFinalizer(options *metav1.DeleteOptions, haveDele
 	return haveDeleteDependentsFinalizer
 }
 
-func (e *REST) ConvertToTable(ctx context.Context, object runtime.Object, tableOptions runtime.Object) (*metav1beta1.Table, error) {
+func (e *REST) ConvertToTable(ctx context.Context, object runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	return e.store.ConvertToTable(ctx, object, tableOptions)
 }
 

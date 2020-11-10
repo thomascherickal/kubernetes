@@ -18,15 +18,15 @@ package storage
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,7 +36,7 @@ import (
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	genericregistrytest "k8s.io/apiserver/pkg/registry/generic/testing"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/apiserver/pkg/storage"
+	apiserverstorage "k8s.io/apiserver/pkg/storage"
 	storeerr "k8s.io/apiserver/pkg/storage/errors"
 	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
@@ -105,7 +105,7 @@ func TestCreate(t *testing.T) {
 	test := genericregistrytest.New(t, storage.Store)
 	pod := validNewPod()
 	pod.ObjectMeta = metav1.ObjectMeta{}
-	// Make an invalid pod with an an incorrect label.
+	// Make an invalid pod with an incorrect label.
 	invalidPod := validNewPod()
 	invalidPod.Namespace = test.TestNamespace()
 	invalidPod.Labels = map[string]string{
@@ -155,13 +155,13 @@ func TestDelete(t *testing.T) {
 }
 
 type FailDeletionStorage struct {
-	storage.Interface
+	apiserverstorage.Interface
 	Called *bool
 }
 
-func (f FailDeletionStorage) Delete(ctx context.Context, key string, out runtime.Object, precondition *storage.Preconditions, _ storage.ValidateObjectFunc) error {
+func (f FailDeletionStorage) Delete(ctx context.Context, key string, out runtime.Object, precondition *apiserverstorage.Preconditions, _ apiserverstorage.ValidateObjectFunc) error {
 	*f.Called = true
-	return storage.NewKeyNotFoundError(key, 0)
+	return apiserverstorage.NewKeyNotFoundError(key, 0)
 }
 
 func newFailDeleteStorage(t *testing.T, called *bool) (*REST, *etcd3testing.EtcdTestServer) {
@@ -252,7 +252,7 @@ func TestCreateSetsFields(t *testing.T) {
 
 func TestResourceLocation(t *testing.T) {
 	expectedIP := "1.2.3.4"
-	expectedIP6 := "2001:db8::"
+	expectedIP6 := "fd00:10:244:0:2::6b"
 	testCases := []struct {
 		pod      api.Pod
 		query    string
@@ -286,6 +286,19 @@ func TestResourceLocation(t *testing.T) {
 			},
 			query:    "foo",
 			location: expectedIP,
+		},
+		{
+			pod: api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.PodSpec{
+					Containers: []api.Container{
+						{Name: "ctr"},
+					},
+				},
+				Status: api.PodStatus{PodIPs: []api.PodIP{{IP: expectedIP6}}},
+			},
+			query:    "foo",
+			location: "[" + expectedIP6 + "]",
 		},
 		{
 			pod: api.Pod{
@@ -355,6 +368,20 @@ func TestResourceLocation(t *testing.T) {
 			query:    "foo",
 			location: expectedIP + ":9376",
 		},
+		{
+			pod: api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.PodSpec{
+					Containers: []api.Container{
+						{Name: "ctr1", Ports: []api.ContainerPort{{ContainerPort: 9376}}},
+						{Name: "ctr2", Ports: []api.ContainerPort{{ContainerPort: 1234}}},
+					},
+				},
+				Status: api.PodStatus{PodIPs: []api.PodIP{{IP: expectedIP6}, {IP: expectedIP}}},
+			},
+			query:    "foo",
+			location: "[" + expectedIP6 + "]:9376",
+		},
 	}
 
 	ctx := genericapirequest.NewDefaultContext()
@@ -380,6 +407,10 @@ func TestResourceLocation(t *testing.T) {
 		if location.Host != tc.location {
 			t.Errorf("Expected %v, but got %v", tc.location, location.Host)
 		}
+		if _, err := url.Parse(location.String()); err != nil {
+			t.Errorf("could not parse returned location %s: %v", location.String(), err)
+		}
+
 		server.Terminate(t)
 	}
 }
@@ -430,7 +461,7 @@ func TestConvertToTableList(t *testing.T) {
 	defer storage.Store.DestroyFunc()
 	ctx := genericapirequest.NewDefaultContext()
 
-	columns := []metav1beta1.TableColumnDefinition{
+	columns := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
 		{Name: "Ready", Type: "string", Description: "The aggregate readiness state of this pod for accepting traffic."},
 		{Name: "Status", Type: "string", Description: "The aggregate status of the containers in this pod."},
@@ -522,7 +553,7 @@ func TestConvertToTableList(t *testing.T) {
 
 	testCases := []struct {
 		in  runtime.Object
-		out *metav1beta1.Table
+		out *metav1.Table
 		err bool
 	}{
 		{
@@ -531,31 +562,31 @@ func TestConvertToTableList(t *testing.T) {
 		},
 		{
 			in: &api.Pod{},
-			out: &metav1beta1.Table{
+			out: &metav1.Table{
 				ColumnDefinitions: columns,
-				Rows: []metav1beta1.TableRow{
+				Rows: []metav1.TableRow{
 					{Cells: []interface{}{"", "0/0", "", int64(0), "<unknown>", "<none>", "<none>", "<none>", "<none>"}, Object: runtime.RawExtension{Object: &api.Pod{}}},
 				},
 			},
 		},
 		{
 			in: pod1,
-			out: &metav1beta1.Table{
+			out: &metav1.Table{
 				ColumnDefinitions: columns,
-				Rows: []metav1beta1.TableRow{
+				Rows: []metav1.TableRow{
 					{Cells: []interface{}{"foo", "1/2", "Pending", int64(10), "370d", "10.1.2.3", "test-node", "nominated-node", "1/2"}, Object: runtime.RawExtension{Object: pod1}},
 				},
 			},
 		},
 		{
 			in:  &api.PodList{},
-			out: &metav1beta1.Table{ColumnDefinitions: columns},
+			out: &metav1.Table{ColumnDefinitions: columns},
 		},
 		{
 			in: multiIPsPod,
-			out: &metav1beta1.Table{
+			out: &metav1.Table{
 				ColumnDefinitions: columns,
-				Rows: []metav1beta1.TableRow{
+				Rows: []metav1.TableRow{
 					{Cells: []interface{}{"foo", "1/2", "Pending", int64(10), "370d", "10.1.2.3", "test-node", "nominated-node", "1/2"}, Object: runtime.RawExtension{Object: multiIPsPod}},
 				},
 			},
